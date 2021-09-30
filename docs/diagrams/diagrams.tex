@@ -1,0 +1,109 @@
+\documentclass[acmsmall]{acmart}
+% clear acmtog.cls footer settings
+\fancyfoot{}
+\setcopyright{none}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\pagestyle{plain}
+%remove reference format
+\settopmatter{printacmref=false}
+\numberwithin{figure}{subsection}
+%
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{fancyvrb}
+\usepackage{tikz} 
+
+\DefineVerbatimEnvironment{code}{Verbatim}{fontsize=\small}
+\begin{document}
+
+\title{Spec Diagrams}
+
+\author{Heliax Team}
+
+\maketitle
+\thispagestyle{empty}
+\tableofcontents
+\clearpage
+
+\section{ABCI++}
+
+\usetikzlibrary{fit}
+\begin{tikzpicture}[node distance={14mm}, thick, main/.style = {draw, rectangle}] 
+\node[main] (1) {Propose}; 
+\node[main] (2) [below of=1] {Vote}; 
+\node[main] (3) [below of=2] {Finalize Commit}; 
+\node[main, scale=1.5] (4) [below of=3] {State Machine}; 
+\draw[->] (1) -- node[midway, right]{} (2); 
+\draw[->] (2) -- node[midway, right] {Wait for enough votes} (3); 
+\draw[->] (3) -- node[midway, right] {Finalize Block} (4); 
+
+\draw[<->] (1) (1.west) -- node[left=3.6em, above=0.1em]{Process proposal phase} ++(-100pt, 0pt) |- (4); 
+\draw[<->] (2) (2.west) --  node[left=3.6em, above=0.1em]{Vote Extension} ++(-50pt, 0pt) |-  (4); 
+
+\draw [->] (3) |- ([shift={(30mm,0mm)}]3.east) -- node[midway, right] {Wait for next proposal}  ([shift={(36mm,5mm)}]1.north east) -| node[above=1em, right=2em]{mempool.getblock()} (1);
+
+\node[draw,dotted,fit=(1) (2) (3), label={[xshift=0mm]left:{}}] {};
+\node[draw,dotted,fit=(1), label={[xshift=0mm]right:{(Block proposer only)}}] {};
+
+\end{tikzpicture} 
+
+
+
+\subsection{ABCI (old)}
+
+\usetikzlibrary{fit}
+\begin{tikzpicture}[node distance={14mm}, thick, main/.style = {draw, rectangle}] 
+\node[main] (1) {Propose}; 
+\node[main] (2) [below of=1] {Prevote}; 
+\node[main] (3) [below of=2] {Precommit}; 
+\node[main] (4) [below of=3] {Finalize Commit}; 
+\node[main, scale=1.5] (5) [below of=4] {State Machine}; 
+\draw[->] (1) -- node[midway, right]{} (2); 
+\draw[->] (2) -- node[midway, right] {Wait for 2/3 prevotes} (3); 
+\draw[->] (3) -- node[midway, right] {Wait for 2/3 precommits} (4); 
+\draw[->] (4) -- node[midway, right] {BeginBlock, DeliverTxs, EndBlock} (5); 
+\draw [->] (4) |- ([shift={(30mm,0mm)}]4.east) -- node[midway, right] {Wait for next proposal}  ([shift={(36mm,5mm)}]1.north east) -| node[above=1em, right=2em]{mempool.getblock()} (1);
+\node[draw,dotted,fit=(1) (2) (3) (4), label={[xshift=0mm]left:{Tendermint Core}}] {};
+\node[draw,dotted,fit=(1), label={[xshift=0mm]right:{(Block proposer only)}}] {};
+\end{tikzpicture} 
+
+
+
+\section{DKG}
+
+
+\usetikzlibrary{positioning, shapes}
+\begin{tikzpicture}[node distance={14mm}, thick, main/.style = {draw, rectangle}] 
+\node[main, fill=blue!25] (1) {Init}; 
+\node[draw, ellipse] (2) [below of=1] {\textbf{deal}}; 
+\node[main, fill=blue!25] (3) [below of=2] {Dealt}; 
+\node[draw, ellipse] (4) [below of=3] {\textit{generate\_transcript}}; 
+\node[main, fill=blue!25] (5) [below of=4] {Shared}; 
+\node[draw, ellipse] (6) [below of=5] {\textbf{aggregate}}; 
+\node[draw, ellipse] (12) [right=15mm of 6] {\textbf{complain}}; 
+\node[main, fill=blue!25] (7) [below of=6] {Aggregated}; 
+\node[draw, ellipse] (8) [below of=7] {\textbf{check}}; 
+\node[draw, ellipse] (13) [right=15mm of 8] {\textbf{complain}}; 
+\node[main, fill=blue!25] (9) [below of=8] {Success}; 
+\node[main, fill=blue!25] (10) [right=30mm of 7] {Invalid}; 
+\node[main, fill=blue!25] (11) [right=30mm of 9] {Invalid}; 
+\draw[-, dashed] (1) -- node[midway, right] {} (2); 
+\draw[->, dashed] (2) -- node[midway, left] {(when > (2/3) of validators)} (3); 
+\draw[-, dotted] (3) -- node[midway, left] {(internally)} (4); 
+\draw[->, dotted] (4) -- node[midway, right] {} (5); 
+\draw[-] (5) -- node[midway, left] {(by block proposer)} (6); 
+\draw[->] (6) -- node[midway, right] {} (7); 
+\draw[-, dashed] (7) -- node[midway, right] {} (8); 
+\draw[->, dashed] (8) -- node[midway, left] {(when > (2/3) of validators)} (9); 
+\draw[->, dotted] (6) -- node[midway, right] {} (10); 
+\draw[->, dotted] (8) -- node[midway, left] {} (11); 
+\draw[-] (5) -- node[midway, right] {} (12); 
+\draw[->] (12) -- node[midway, right] {} (10); 
+\draw[-] (7) -- node[midway, right] {} (13); 
+\draw[->] (13) -- node[midway, right] {} (11); 
+
+
+\end{tikzpicture} 
+
+
+\end{document}
