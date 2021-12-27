@@ -1,6 +1,9 @@
 #[cfg(feature = "vp_user")]
 pub mod vp_user;
 
+#[cfg(feature = "vp_validator")]
+pub mod vp_validator;
+
 #[cfg(feature = "vp_testnet_faucet")]
 pub mod vp_testnet_faucet;
 
