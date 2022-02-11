@@ -86,6 +86,7 @@ impl DB for MockDB {
         let mut epoch = None;
         let mut pred_epochs = None;
         let mut address_gen = None;
+        let mut encryption_key = None;
         for (path, bytes) in self
             .0
             .borrow()
@@ -134,26 +135,36 @@ impl DB for MockDB {
                             types::decode(bytes).map_err(Error::CodingError)?,
                         );
                     }
+                    "encryption_key" => {
+                        encryption_key = Some(
+                            types::decode(bytes).map_err(Error::CodingError)?,
+                        );
+                    }
                     _ => unknown_key_error(path)?,
                 },
                 None => unknown_key_error(path)?,
             }
         }
-        match (hash, epoch, pred_epochs, address_gen) {
-            (Some(hash), Some(epoch), Some(pred_epochs), Some(address_gen)) => {
-                Ok(Some(BlockStateRead {
-                    merkle_tree_stores,
-                    hash,
-                    height,
-                    epoch,
-                    pred_epochs,
-                    next_epoch_min_start_height,
-                    next_epoch_min_start_time,
-                    address_gen,
-                    #[cfg(feature = "ferveo-tpke")]
-                    tx_queue,
-                }))
-            }
+        match (hash, epoch, pred_epochs, address_gen, encryption_key) {
+            (
+                Some(hash),
+                Some(epoch),
+                Some(pred_epochs),
+                Some(address_gen),
+                Some(encryption_key),
+            ) => Ok(Some(BlockStateRead {
+                merkle_tree_stores,
+                hash,
+                height,
+                epoch,
+                pred_epochs,
+                next_epoch_min_start_height,
+                next_epoch_min_start_time,
+                address_gen,
+                encryption_key,
+                #[cfg(feature = "ferveo-tpke")]
+                tx_queue,
+            })),
             _ => Err(Error::Temporary {
                 error: "Essential data couldn't be read from the DB"
                     .to_string(),
@@ -171,6 +182,7 @@ impl DB for MockDB {
             next_epoch_min_start_height,
             next_epoch_min_start_time,
             address_gen,
+            encryption_key,
             #[cfg(feature = "ferveo-tpke")]
             tx_queue,
         }: BlockStateWrite = state;
@@ -250,6 +262,16 @@ impl DB for MockDB {
                 .push(&"address_gen".to_owned())
                 .map_err(Error::KeyError)?;
             let value = &address_gen;
+            self.0
+                .borrow_mut()
+                .insert(key.to_string(), types::encode(value));
+        }
+        // Encryption key
+        {
+            let key = prefix_key
+                .push(&"encryption_key".to_owned())
+                .map_err(Error::KeyError)?;
+            let value = &encryption_key;
             self.0
                 .borrow_mut()
                 .insert(key.to_string(), types::encode(value));

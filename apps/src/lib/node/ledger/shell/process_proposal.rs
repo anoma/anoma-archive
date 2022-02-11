@@ -1,5 +1,10 @@
 //! Implementation of the ['VerifyHeader`], [`ProcessProposal`],
 //! and [`RevertProposal`] ABCI++ methods for the Shell
+#[cfg(not(feature = "ABCI"))]
+use anoma::types::key::dkg_session_keys::DkgPublicKey;
+#[cfg(not(feature = "ABCI"))]
+use anoma::types::key::ed25519::SignedTxData;
+
 use super::*;
 
 impl<D, H> Shell<D, H>
@@ -56,7 +61,7 @@ where
         let privkey = <EllipticCurve as PairingEngine>::G2Affine::prime_subgroup_generator();
 
         match process_tx(tx) {
-            // This occurs if the wrapper tx signature is invalid
+            // This occurs if the wrapper / protocol tx signature is invalid
             Err(err) => TxResult {
                 code: ErrorCodes::InvalidSig.into(),
                 info: err.to_string(),
@@ -69,6 +74,102 @@ where
                            are not supported"
                         .into(),
                 },
+                #[cfg(not(feature = "ABCI"))]
+                TxType::Protocol(ProtocolTx {
+                    tx: protocol_tx,
+                    pk,
+                }) => {
+                    let rng =
+                        &mut ark_std::rand::prelude::StdRng::from_entropy();
+                    if let (Some(sender), ShellMode::Validator { dkg, .. }) = (
+                        self.get_validator_from_protocol_pk(&pk),
+                        &mut self.mode,
+                    ) {
+                        match protocol_tx {
+                            ProtocolTxType::DKG(msg) => {
+                                match dkg
+                                    .state_machine
+                                    .verify_message(&sender, &msg, rng)
+                                {
+                                    Ok(_) => shim::response::TxResult {
+                                        code: ErrorCodes::Ok.into(),
+                                        info: "Process proposal accepted this \
+                                               transaction"
+                                            .into(),
+                                    },
+                                    Err(err) => shim::response::TxResult {
+                                        code: ErrorCodes::InvalidTx.into(),
+                                        info: err.to_string(),
+                                    },
+                                }
+                            }
+                            ProtocolTxType::NewDkgKeypair(ref tx) => {
+                                match tx.data.as_ref().map(|data| {
+                                    if let Ok(SignedTxData {
+                                        data: Some(inner_data),
+                                        ..
+                                    }) =
+                                        SignedTxData::try_from_slice(&data[..])
+                                    {
+                                        UpdateDkgSessionKey::deserialize(
+                                            &mut inner_data.as_ref(),
+                                        )
+                                        .map_or(false, |ref update_keypair| {
+                                            DkgPublicKey::deserialize(
+                                                &mut update_keypair
+                                                    .dkg_public_key
+                                                    .as_ref(),
+                                            )
+                                            .is_ok()
+                                        })
+                                    } else {
+                                        false
+                                    }
+                                }) {
+                                    None => shim::response::TxResult {
+                                        code: ErrorCodes::InvalidTx.into(),
+                                        info: "The address and new DKG public \
+                                               session key are missing from \
+                                               the tx."
+                                            .into(),
+                                    },
+                                    Some(false) => shim::response::TxResult {
+                                        code: ErrorCodes::InvalidTx.into(),
+                                        info: "The address and / or new DKG \
+                                               public session key were not \
+                                               deserializable. This may be \
+                                               because the inner tx was not \
+                                               signed"
+                                            .into(),
+                                    },
+                                    Some(true) => shim::response::TxResult {
+                                        code: ErrorCodes::Ok.into(),
+                                        info: "Process proposal accepted this \
+                                               transaction"
+                                            .into(),
+                                    },
+                                }
+                            }
+                        }
+                    } else {
+                        shim::response::TxResult {
+                            code: ErrorCodes::InvalidSig.into(),
+                            info: "Could not match signature of protocol tx \
+                                   to a public protocol key of an active \
+                                   validator set."
+                                .into(),
+                        }
+                    }
+                }
+                #[cfg(feature = "ABCI")]
+                TxType::Protocol(ProtocolTx { .. }) => {
+                    shim::response::TxResult {
+                        code: ErrorCodes::InvalidTx.into(),
+                        info: "Protocol transactions are not supported for \
+                               the ABCI feature"
+                            .into(),
+                    }
+                }
                 TxType::Decrypted(tx) => match self.next_wrapper() {
                     Some(wrapper) => {
                         if wrapper.tx_hash != tx.hash_commitment() {
@@ -165,6 +266,12 @@ where
         };
         match process_tx(req_tx.clone()) {
             Ok(TxType::Wrapper(_)) => {}
+            Ok(TxType::Protocol(_)) => {
+                let tx_bytes = req.tx.clone();
+                let mut response = self.process_proposal(req);
+                response.tx = tx_bytes;
+                return response;
+            }
             Ok(_) => {
                 return shim::response::ProcessProposal {
                     result: shim::response::TxResult {
@@ -232,6 +339,7 @@ where
 #[cfg(test)]
 mod test_process_proposal {
     use anoma::types::address::xan;
+    use anoma::types::chain::ChainId;
     use anoma::types::key::ed25519::SignedTxData;
     use anoma::types::storage::Epoch;
     use anoma::types::token::Amount;
@@ -247,6 +355,8 @@ mod test_process_proposal {
     use tendermint_proto_abci::google::protobuf::Timestamp;
 
     use super::*;
+    #[cfg(not(feature = "ABCI"))]
+    use crate::node::ledger::shell::test_utils::setup;
     use crate::node::ledger::shell::test_utils::{gen_keypair, TestShell};
     use crate::node::ledger::shims::abcipp_shim_types::shim::request::ProcessProposal;
 
@@ -254,7 +364,7 @@ mod test_process_proposal {
     /// by [`process_proposal`].
     #[test]
     fn test_unsigned_wrapper_rejected() {
-        let mut shell = TestShell::new();
+        let (mut shell, _) = TestShell::new();
         let keypair = gen_keypair();
         let tx = Tx::new(
             "wasm_code".as_bytes().to_owned(),
@@ -269,6 +379,7 @@ mod test_process_proposal {
             Epoch(0),
             0.into(),
             tx,
+            Default::default(),
         );
         let tx = Tx::new(
             vec![],
@@ -282,7 +393,7 @@ mod test_process_proposal {
         assert_eq!(response.result.code, u32::from(ErrorCodes::InvalidSig));
         assert_eq!(
             response.result.info,
-            String::from("Expected signed WrapperTx data")
+            String::from("Wrapper transactions must be signed")
         );
         #[cfg(feature = "ABCI")]
         {
@@ -294,7 +405,7 @@ mod test_process_proposal {
     /// Test that a wrapper tx with invalid signature is rejected
     #[test]
     fn test_wrapper_bad_signature_rejected() {
-        let mut shell = TestShell::new();
+        let (mut shell, _) = TestShell::new();
         let keypair = gen_keypair();
         let tx = Tx::new(
             "wasm_code".as_bytes().to_owned(),
@@ -310,6 +421,7 @@ mod test_process_proposal {
             Epoch(0),
             0.into(),
             tx,
+            Default::default(),
         )
         .sign(&keypair)
         .expect("Test failed");
@@ -373,8 +485,9 @@ mod test_process_proposal {
     /// non-zero, [`process_proposal`] rejects that tx
     #[test]
     fn test_wrapper_unknown_address() {
-        let mut shell = TestShell::new();
+        let (mut shell, _) = TestShell::new();
         let keypair = crate::wallet::defaults::keys().remove(0).1;
+        let keypair = keypair.lock();
         let tx = Tx::new(
             "wasm_code".as_bytes().to_owned(),
             Some("transaction data".as_bytes().to_owned()),
@@ -388,6 +501,7 @@ mod test_process_proposal {
             Epoch(0),
             0.into(),
             tx,
+            Default::default(),
         )
         .sign(&keypair)
         .expect("Test failed");
@@ -413,7 +527,7 @@ mod test_process_proposal {
     /// [`process_proposal`] rejects that tx
     #[test]
     fn test_wrapper_insufficient_balance_address() {
-        let mut shell = TestShell::new();
+        let (mut shell, _) = TestShell::new();
         shell.init_chain(RequestInitChain {
             time: Some(Timestamp {
                 seconds: 0,
@@ -423,7 +537,7 @@ mod test_process_proposal {
             ..Default::default()
         });
         let keypair = crate::wallet::defaults::daewon_keypair();
-
+        let keypair = keypair.lock();
         let tx = Tx::new(
             "wasm_code".as_bytes().to_owned(),
             Some("transaction data".as_bytes().to_owned()),
@@ -437,6 +551,7 @@ mod test_process_proposal {
             Epoch(0),
             0.into(),
             tx,
+            Default::default(),
         )
         .sign(&keypair)
         .expect("Test failed");
@@ -465,7 +580,7 @@ mod test_process_proposal {
     /// validated, [`process_proposal`] rejects it
     #[test]
     fn test_decrypted_txs_out_of_order() {
-        let mut shell = TestShell::new();
+        let (mut shell, _) = TestShell::new();
         let keypair = gen_keypair();
         let mut txs = vec![];
         for i in 0..3 {
@@ -482,6 +597,7 @@ mod test_process_proposal {
                 Epoch(0),
                 0.into(),
                 tx.clone(),
+                Default::default(),
             );
             shell.enqueue_tx(wrapper);
             txs.push(Tx::from(TxType::Decrypted(DecryptedTx::Decrypted(tx))));
@@ -512,7 +628,7 @@ mod test_process_proposal {
     /// is rejected by [`process_proposal`]
     #[test]
     fn test_incorrectly_labelled_as_undecryptable() {
-        let mut shell = TestShell::new();
+        let (mut shell, _) = TestShell::new();
         let keypair = gen_keypair();
 
         let tx = Tx::new(
@@ -528,6 +644,7 @@ mod test_process_proposal {
             Epoch(0),
             0.into(),
             tx,
+            Default::default(),
         );
         shell.enqueue_tx(wrapper.clone());
 
@@ -550,7 +667,7 @@ mod test_process_proposal {
     /// Test that undecryptable txs are accepted
     #[test]
     fn test_undecryptable() {
-        let mut shell = TestShell::new();
+        let (mut shell, _) = TestShell::new();
         shell.init_chain(RequestInitChain {
             time: Some(Timestamp {
                 seconds: 0,
@@ -560,7 +677,7 @@ mod test_process_proposal {
             ..Default::default()
         });
         let keypair = crate::wallet::defaults::daewon_keypair();
-
+        let keypair = keypair.lock();
         let tx = Tx::new(
             "wasm_code".as_bytes().to_owned(),
             Some("transaction data".as_bytes().to_owned()),
@@ -574,6 +691,7 @@ mod test_process_proposal {
             Epoch(0),
             0.into(),
             tx,
+            Default::default(),
         );
         wrapper.tx_hash = Hash([0; 32]);
 
@@ -615,7 +733,7 @@ mod test_process_proposal {
     /// [`process_proposal`] than expected, they are rejected
     #[test]
     fn test_too_many_decrypted_txs() {
-        let mut shell = TestShell::new();
+        let (mut shell, _) = TestShell::new();
 
         let tx = Tx::new(
             "wasm_code".as_bytes().to_owned(),
@@ -636,7 +754,7 @@ mod test_process_proposal {
     /// Process Proposal should reject a RawTx, but not panic
     #[test]
     fn test_raw_tx_rejected() {
-        let mut shell = TestShell::new();
+        let (mut shell, _) = TestShell::new();
 
         let tx = Tx::new(
             "wasm_code".as_bytes().to_owned(),
@@ -657,5 +775,132 @@ mod test_process_proposal {
         {
             assert_eq!(response.tx, tx.to_bytes());
         }
+    }
+
+    #[cfg(not(feature = "ABCI"))]
+    /// Test that a valid DKG message is acceped
+    #[test]
+    fn test_valid_dkg_msgs_accepted() {
+        let (mut shell, _) = setup();
+        let rng = &mut ark_std::test_rng();
+
+        let protocol_tx = if let ShellMode::Validator { dkg, data, .. } =
+            &mut shell.shell.mode
+        {
+            let msg = dkg.state_machine.share(rng).expect("Test failed");
+            let protocol_keys = data.keys.protocol_keypair.lock();
+            ProtocolTxType::DKG(msg).sign(&protocol_keys)
+        } else {
+            panic!("Test failed");
+        };
+
+        let request = ProcessProposal {
+            tx: protocol_tx.to_bytes(),
+        };
+        let response = shell.process_proposal(request);
+        assert_eq!(response.result.code, u32::from(ErrorCodes::Ok));
+    }
+
+    #[cfg(not(feature = "ABCI"))]
+    /// Test that a request for new DKG session keypairs
+    /// is accepted
+    #[test]
+    fn test_valid_new_dkg_keypair() {
+        let (mut shell, _) = setup();
+        let tx = if let ShellMode::Validator { data, .. } =
+            &mut shell.shell.mode
+        {
+            let protocol_keys = data.keys.protocol_keypair.lock();
+            let request_data = UpdateDkgSessionKey {
+                address: data.address.clone(),
+                dkg_public_key: data
+                    .keys
+                    .dkg_keypair
+                    .as_ref()
+                    .unwrap()
+                    .public()
+                    .try_to_vec()
+                    .expect("Serialization of DKG public key shouldn't fail"),
+            };
+            ProtocolTxType::request_new_dkg_keypair(
+                request_data,
+                &protocol_keys,
+                &shell.shell.wasm_dir,
+                read_wasm,
+            )
+            .sign(&protocol_keys)
+            .to_bytes()
+        } else {
+            panic!("Test failed");
+        };
+        let request = ProcessProposal { tx };
+        let response = shell.process_proposal(request);
+        assert_eq!(response.result.code, u32::from(ErrorCodes::Ok));
+    }
+
+    #[cfg(not(feature = "ABCI"))]
+    /// If we encounter a protocol tx signed by someone who is
+    /// not a validator, reject it.
+    #[test]
+    fn test_reject_protocol_txs_from_non_validators() {
+        let (mut shell, _) = setup();
+        let rng = &mut ark_std::test_rng();
+        let non_validator_keys = gen_keypair();
+        let protocol_tx =
+            if let ShellMode::Validator { dkg, .. } = &mut shell.shell.mode {
+                let msg = dkg.state_machine.share(rng).expect("Test failed");
+                ProtocolTxType::DKG(msg).sign(&non_validator_keys)
+            } else {
+                panic!("Test failed");
+            };
+
+        let request = ProcessProposal {
+            tx: protocol_tx.to_bytes(),
+        };
+        let response = shell.process_proposal(request);
+        assert_eq!(response.result.code, u32::from(ErrorCodes::InvalidSig));
+    }
+
+    #[cfg(not(feature = "ABCI"))]
+    /// Test that we get the correct errors if the new keypairs / target address
+    /// are missing or is not deserializable
+    #[test]
+    fn test_malformed_dkg_keypair_tx() {
+        let (mut shell, _) = setup();
+        let (tx_1, tx_2) =
+            if let ShellMode::Validator { data, .. } = &mut shell.shell.mode {
+                let protocol_keys = data.keys.protocol_keypair.lock();
+                let request_data: Vec<u8> = "invalid".as_bytes().to_owned();
+                let code =
+                    read_wasm(
+                        shell.shell.wasm_dir.to_str().expect(
+                            "Converting path to string should not fail",
+                        ),
+                        "tx_update_dkg_session_keypair.wasm",
+                    );
+                (
+                    ProtocolTxType::NewDkgKeypair(Tx::new(
+                        code.clone(),
+                        Some(
+                            request_data
+                                .try_to_vec()
+                                .expect("Serializing request should not fail"),
+                        ),
+                    ))
+                    .sign(&protocol_keys)
+                    .to_bytes(),
+                    ProtocolTxType::NewDkgKeypair(Tx::new(code, None))
+                        .sign(&protocol_keys)
+                        .to_bytes(),
+                )
+            } else {
+                panic!("Test failed");
+            };
+        let request = ProcessProposal { tx: tx_1 };
+        let response = shell.process_proposal(request);
+        assert_eq!(response.result.code, u32::from(ErrorCodes::InvalidTx));
+        let request = ProcessProposal { tx: tx_2 };
+        let response = shell.process_proposal(request);
+        assert_eq!(response.result.code, u32::from(ErrorCodes::InvalidTx));
     }
 }

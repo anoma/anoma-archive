@@ -13,6 +13,7 @@ use anoma::proto::{self, Tx};
 use anoma::types::address::{Address, InternalAddress};
 use anoma::types::ibc::IbcEvent;
 use anoma::types::storage::Key;
+use anoma::types::transaction::protocol::{ProtocolTx, ProtocolTxType};
 use anoma::types::transaction::{DecryptedTx, TxType};
 use anoma::vm::wasm::{TxCache, VpCache};
 use anoma::vm::{self, wasm, WasmCacheAccess};
@@ -103,7 +104,11 @@ where
         .map_err(Error::GasError)?;
     match tx {
         TxType::Raw(_) => Err(Error::TxTypeError),
-        TxType::Decrypted(DecryptedTx::Decrypted(tx)) => {
+        TxType::Protocol(ProtocolTx {
+            tx: ProtocolTxType::NewDkgKeypair(tx),
+            ..
+        })
+        | TxType::Decrypted(DecryptedTx::Decrypted(tx)) => {
             let verifiers = execute_tx(
                 &tx,
                 storage,

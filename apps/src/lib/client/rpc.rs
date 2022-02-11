@@ -13,6 +13,7 @@ use anoma::ledger::pos::{
 use anoma::types::address::Address;
 use anoma::types::key::ed25519;
 use anoma::types::storage::Epoch;
+use anoma::types::transaction::EncryptionKey;
 use anoma::types::{address, storage, token};
 use borsh::BorshDeserialize;
 use itertools::Itertools;
@@ -65,6 +66,44 @@ pub async fn query_epoch(args: args::Query) -> Epoch {
                 eprintln!("Error decoding the epoch value: {}", err)
             }
         },
+        Code::Err(err) => eprintln!(
+            "Error in the query {} (error code {})",
+            response.info, err
+        ),
+    }
+    cli::safe_exit(1)
+}
+
+/// Query the encryption key of the current epoch
+pub async fn query_encryption_key(args: args::Query) -> Option<EncryptionKey> {
+    let client = HttpClient::new(args.ledger_address).unwrap();
+    let path = Path::EncryptionKey;
+    let data = vec![];
+    let response = client
+        .abci_query(Some(path.into()), data, None, false)
+        .await
+        .unwrap();
+    match response.code {
+        Code::Ok => {
+            match Option::<Vec<u8>>::try_from_slice(&response.value[..]) {
+                Ok(Some(encryption_key)) => {
+                    println!("Current encryption key: {:?}", encryption_key);
+                    return BorshDeserialize::try_from_slice(
+                        &encryption_key[..],
+                    )
+                    .ok();
+                }
+                Ok(None) => {
+                    return None;
+                }
+                Err(err) => {
+                    eprintln!(
+                        "Error decoding the encryption key value: {}",
+                        err
+                    )
+                }
+            }
+        }
         Code::Err(err) => eprintln!(
             "Error in the query {} (error code {})",
             response.info, err

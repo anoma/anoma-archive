@@ -5,6 +5,8 @@
 pub mod decrypted;
 mod encrypted;
 pub mod pos;
+/// transaction protocols made by validators
+pub mod protocol;
 /// wrapper txs with encrypted payloads
 pub mod wrapper;
 
@@ -12,6 +14,9 @@ use std::fmt::{self, Display};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 pub use decrypted::*;
+#[cfg(feature = "ferveo-tpke")]
+pub use encrypted::EncryptionKey;
+pub use protocol::UpdateDkgSessionKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(not(feature = "ABCI"))]
@@ -118,6 +123,10 @@ pub struct InitValidator {
     /// This can be used for signature verification of transactions for the
     /// newly created account.
     pub rewards_account_key: PublicKey,
+    /// Public key used to sign protocol transactions
+    pub protocol_key: PublicKey,
+    /// Serialization of the public session key used in the DKG
+    pub dkg_key: DkgPublicKey,
     /// The VP code for validator account
     pub validator_vp_code: Vec<u8>,
     /// The VP code for validator's staking reward account
@@ -132,9 +141,25 @@ pub struct InitValidator {
 pub mod tx_types {
     use std::convert::TryFrom;
 
+    use thiserror;
+
     use super::*;
     use crate::proto::Tx;
-    use crate::types::key::ed25519::{verify_tx_sig, SignedTxData};
+    use crate::types::key::ed25519::SignedTxData;
+    use crate::types::transaction::protocol::ProtocolTx;
+
+    /// Errors relating to decrypting a wrapper tx and its
+    /// encrypted payload from a Tx type
+    #[allow(missing_docs)]
+    #[derive(thiserror::Error, Debug, PartialEq)]
+    pub enum TxError {
+        #[error("{0}")]
+        Unsigned(String),
+        #[error("{0}")]
+        SigError(String),
+        #[error("Failed to deserialize Tx: {0}")]
+        Deserialization(String),
+    }
 
     /// Struct that classifies that kind of Tx
     /// based on the contents of its data.
@@ -146,6 +171,8 @@ pub mod tx_types {
         Wrapper(WrapperTx),
         /// An attempted decryption of a wrapper tx
         Decrypted(DecryptedTx),
+        /// Txs issued by validators as part of internal protocols
+        Protocol(ProtocolTx),
     }
 
     impl From<TxType> for Tx {
@@ -192,7 +219,7 @@ pub mod tx_types {
     /// data if valid and return it wrapped in a enum variant
     /// indicating it is a wrapper. Otherwise, an error is
     /// returned indicating the signature was not valid
-    pub fn process_tx(tx: Tx) -> Result<TxType, WrapperTxErr> {
+    pub fn process_tx(tx: Tx) -> Result<TxType, TxError> {
         if let Some(Ok(SignedTxData {
             data: Some(data),
             ref sig,
@@ -206,13 +233,17 @@ pub mod tx_types {
                 data: Some(data),
                 timestamp: tx.timestamp,
             })
-            .map_err(|err| WrapperTxErr::Deserialization(err.to_string()))?
+            .map_err(|err| TxError::Deserialization(err.to_string()))?
             {
                 // verify signature and extract signed data
                 TxType::Wrapper(wrapper) => {
-                    verify_tx_sig(&wrapper.pk, &tx, sig)
-                        .map_err(WrapperTxErr::SigError)?;
+                    wrapper.validate_sig(&tx, sig)?;
                     Ok(TxType::Wrapper(wrapper))
+                }
+                // verify signature and extract signed data
+                TxType::Protocol(protocol) => {
+                    protocol.validate_sig(&tx, sig)?;
+                    Ok(TxType::Protocol(protocol))
                 }
                 // we extract the signed data, but don't check the signature
                 decrypted @ TxType::Decrypted(_) => Ok(decrypted),
@@ -221,10 +252,15 @@ pub mod tx_types {
             }
         } else {
             match TxType::try_from(tx)
-                .map_err(|err| WrapperTxErr::Deserialization(err.to_string()))?
+                .map_err(|err| TxError::Deserialization(err.to_string()))?
             {
                 // we only accept signed wrappers
-                TxType::Wrapper(_) => Err(WrapperTxErr::Unsigned),
+                TxType::Wrapper(_) => Err(TxError::Unsigned(
+                    "Wrapper transactions must be signed".into(),
+                )),
+                TxType::Protocol(_) => Err(TxError::Unsigned(
+                    "Protocol transactions must be signed".into(),
+                )),
                 // return as is
                 val => Ok(val),
             }
@@ -325,6 +361,7 @@ pub mod tx_types {
                 Epoch(0),
                 0.into(),
                 tx.clone(),
+                Default::default(),
             )
             .sign(&keypair)
             .expect("Test failed");
@@ -359,6 +396,7 @@ pub mod tx_types {
                 Epoch(0),
                 0.into(),
                 tx,
+                Default::default(),
             );
 
             let tx = Tx::new(
@@ -368,7 +406,7 @@ pub mod tx_types {
                 ),
             );
             let result = process_tx(tx).expect_err("Test failed");
-            assert_matches!(result, WrapperTxErr::Unsigned);
+            assert_matches!(result, TxError::Unsigned(_));
         }
     }
 
@@ -423,3 +461,5 @@ pub mod tx_types {
 
 #[cfg(feature = "ferveo-tpke")]
 pub use tx_types::*;
+
+use crate::types::key::dkg_session_keys::DkgPublicKey;

@@ -28,6 +28,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::config;
+use crate::wallet::AtomicKeypair;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -111,6 +112,7 @@ pub async fn run(
     #[cfg(feature = "dev")]
     {
         let genesis = &crate::config::genesis::genesis();
+        let consensus_key = crate::wallet::defaults::validator_keypair();
         // write the validator key file if it didn't already exist
         if !has_validator_key {
             write_validator_key_async(
@@ -123,7 +125,7 @@ pub async fn run(
                     )
                     .pos_data
                     .address,
-                &crate::wallet::defaults::validator_keypair(),
+                consensus_key,
             )
             .await;
         }
@@ -134,6 +136,19 @@ pub async fn run(
     update_tendermint_config(&home_dir, config).await?;
 
     let mut tendermint_node = if !cfg!(feature = "ABCI") {
+        tracing::info!(
+            "Path: {}, args: {:?}",
+            &tendermint_path,
+            &[
+                "start",
+                "--mode",
+                &mode,
+                "--proxy-app",
+                &ledger_address,
+                "--home",
+                &home_dir_string,
+            ]
+        );
         Command::new(&tendermint_path)
             .args(&[
                 "start",
@@ -218,7 +233,7 @@ pub fn reset(tendermint_dir: impl AsRef<Path>) -> Result<()> {
 pub async fn write_validator_key_async(
     home_dir: impl AsRef<Path>,
     address: &Address,
-    consensus_key: &Keypair,
+    consensus_key: AtomicKeypair,
 ) {
     let home_dir = home_dir.as_ref();
     let path = home_dir.join("config").join("priv_validator_key.json");
@@ -234,7 +249,7 @@ pub async fn write_validator_key_async(
         .open(&path)
         .await
         .expect("Couldn't create private validator key file");
-    let pk: ed25519_dalek::PublicKey = consensus_key.public.clone().into();
+    let pk: ed25519_dalek::PublicKey = consensus_key.public().into();
     let pk = base64::encode(pk.as_bytes());
     let sk = base64::encode(consensus_key.to_bytes());
     let address = address.raw_hash().unwrap();

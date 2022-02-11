@@ -65,6 +65,8 @@ where
     pub next_epoch_min_start_time: DateTimeUtc,
     /// The current established address generator
     pub address_gen: EstablishedAddressGen,
+    /// The serialization of the key used to encrypt txs during this epoch
+    pub encryption_key: Option<Vec<u8>>,
     /// Wrapper txs to be decrypted in the next block proposal
     #[cfg(feature = "ferveo-tpke")]
     pub tx_queue: TxQueue,
@@ -120,6 +122,8 @@ pub struct BlockStateRead {
     pub next_epoch_min_start_time: DateTimeUtc,
     /// Established address generator
     pub address_gen: EstablishedAddressGen,
+    /// The serialization of the key used to encrypt txs during this epoch
+    pub encryption_key: Option<Vec<u8>>,
     /// Wrapper txs to be decrypted in the next block proposal
     #[cfg(feature = "ferveo-tpke")]
     pub tx_queue: TxQueue,
@@ -143,6 +147,8 @@ pub struct BlockStateWrite<'a> {
     pub next_epoch_min_start_time: DateTimeUtc,
     /// Established address generator
     pub address_gen: &'a EstablishedAddressGen,
+    /// The serialization of the key used to encrypt txs during this epoch
+    pub encryption_key: Option<Vec<u8>>,
     /// Wrapper txs to be decrypted in the next block proposal
     #[cfg(feature = "ferveo-tpke")]
     pub tx_queue: &'a TxQueue,
@@ -272,6 +278,7 @@ where
             address_gen: EstablishedAddressGen::new(
                 "Privacy is a function of liberty.",
             ),
+            encryption_key: None,
             #[cfg(feature = "ferveo-tpke")]
             tx_queue: TxQueue::default(),
         }
@@ -289,6 +296,7 @@ where
             next_epoch_min_start_height,
             next_epoch_min_start_time,
             address_gen,
+            encryption_key,
             #[cfg(feature = "ferveo-tpke")]
             tx_queue,
         }) = self.db.read_last_block()?
@@ -303,6 +311,7 @@ where
             self.next_epoch_min_start_height = next_epoch_min_start_height;
             self.next_epoch_min_start_time = next_epoch_min_start_time;
             self.address_gen = address_gen;
+            self.encryption_key = encryption_key;
             #[cfg(feature = "ferveo-tpke")]
             {
                 self.tx_queue = tx_queue;
@@ -335,6 +344,7 @@ where
             next_epoch_min_start_height: self.next_epoch_min_start_height,
             next_epoch_min_start_time: self.next_epoch_min_start_time,
             address_gen: &self.address_gen,
+            encryption_key: self.encryption_key.clone(),
             #[cfg(feature = "ferveo-tpke")]
             tx_queue: &self.tx_queue,
         };
@@ -650,6 +660,7 @@ pub mod testing {
                 address_gen: EstablishedAddressGen::new(
                     "Test address generator seed",
                 ),
+                encryption_key: None,
                 #[cfg(feature = "ferveo-tpke")]
                 tx_queue: TxQueue::default(),
             }

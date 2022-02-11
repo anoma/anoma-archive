@@ -322,6 +322,7 @@ impl DB for RocksDB {
         let mut epoch = None;
         let mut pred_epochs = None;
         let mut address_gen = None;
+        let mut encryption_key = None;
         for (key, bytes) in self.0.iterator_opt(
             IteratorMode::From(prefix.as_bytes(), Direction::Forward),
             read_opts,
@@ -377,6 +378,11 @@ impl DB for RocksDB {
                             types::decode(bytes).map_err(Error::CodingError)?,
                         );
                     }
+                    "encryption_key" => {
+                        encryption_key = Some(
+                            types::decode(bytes).map_err(Error::CodingError)?,
+                        );
+                    }
                     "diffs" => {
                         // ignore the diffs
                     }
@@ -385,20 +391,25 @@ impl DB for RocksDB {
                 None => unknown_key_error(path)?,
             }
         }
-        match (hash, epoch, pred_epochs, address_gen) {
-            (Some(hash), Some(epoch), Some(pred_epochs), Some(address_gen)) => {
-                Ok(Some(BlockStateRead {
-                    merkle_tree_stores,
-                    hash,
-                    height,
-                    epoch,
-                    pred_epochs,
-                    next_epoch_min_start_height,
-                    next_epoch_min_start_time,
-                    address_gen,
-                    tx_queue,
-                }))
-            }
+        match (hash, epoch, pred_epochs, address_gen, encryption_key) {
+            (
+                Some(hash),
+                Some(epoch),
+                Some(pred_epochs),
+                Some(address_gen),
+                Some(encryption_key),
+            ) => Ok(Some(BlockStateRead {
+                merkle_tree_stores,
+                hash,
+                height,
+                epoch,
+                pred_epochs,
+                next_epoch_min_start_height,
+                next_epoch_min_start_time,
+                address_gen,
+                encryption_key,
+                tx_queue,
+            })),
             _ => Err(Error::Temporary {
                 error: "Essential data couldn't be read from the DB"
                     .to_string(),
@@ -417,6 +428,7 @@ impl DB for RocksDB {
             next_epoch_min_start_height,
             next_epoch_min_start_time,
             address_gen,
+            encryption_key,
             tx_queue,
         }: BlockStateWrite = state;
 
@@ -510,6 +522,13 @@ impl DB for RocksDB {
                 .push(&"address_gen".to_owned())
                 .map_err(Error::KeyError)?;
             batch.put(key.to_string(), types::encode(&address_gen));
+        }
+        // Encryption key
+        {
+            let key = prefix_key
+                .push(&"encryption_key".to_owned())
+                .map_err(Error::KeyError)?;
+            batch.put(key.to_string(), types::encode(&encryption_key));
         }
 
         // Block height
@@ -866,6 +885,7 @@ mod test {
             next_epoch_min_start_height,
             next_epoch_min_start_time,
             address_gen: &address_gen,
+            encryption_key: None,
             tx_queue: &tx_queue,
         };
 

@@ -1,16 +1,14 @@
 use std::env;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::Arc;
 
 use anoma::proto::Tx;
 use anoma::types::address::{self, Address};
 use anoma::types::dylib;
 use anoma::types::intent::{IntentTransfers, MatchedExchanges};
-use anoma::types::key::ed25519::Keypair;
 use anoma::types::matchmaker::AddIntentResult;
-use anoma::types::transaction::{Fee, WrapperTx};
+use anoma::types::transaction::{hash_tx, Fee, WrapperTx};
 use borsh::{BorshDeserialize, BorshSerialize};
 use libc::c_void;
 use libloading::Library;
@@ -28,7 +26,8 @@ use super::gossip::rpc::matchmakers::{
 };
 use crate::cli::args;
 use crate::client::rpc;
-use crate::client::tx::broadcast_tx;
+use crate::client::tx::{broadcast_tx, TxBroadcastData};
+use crate::wallet::AtomicKeypair;
 use crate::{cli, config, wasm_loader};
 
 /// Run a matchmaker
@@ -40,7 +39,7 @@ pub async fn run(
     }: config::Matchmaker,
     intent_gossiper_addr: SocketAddr,
     ledger_addr: TendermintAddress,
-    tx_signing_key: Rc<Keypair>,
+    tx_signing_key: AtomicKeypair,
     tx_source_address: Address,
     wasm_dir: impl AsRef<Path>,
 ) {
@@ -103,7 +102,7 @@ pub struct ResultHandler {
     /// A source address for transactions created from intents.
     tx_source_address: Address,
     /// A keypair that will be used to sign transactions.
-    tx_signing_key: Rc<Keypair>,
+    tx_signing_key: AtomicKeypair,
 }
 
 /// The loaded implementation's dylib and its state
@@ -131,7 +130,7 @@ impl Runner {
         matchmaker_path: PathBuf,
         tx_code_path: PathBuf,
         ledger_address: TendermintAddress,
-        tx_signing_key: Rc<Keypair>,
+        tx_signing_key: AtomicKeypair,
         tx_source_address: Address,
         wasm_dir: impl AsRef<Path>,
     ) -> (Self, ResultHandler) {
@@ -313,23 +312,46 @@ impl ResultHandler {
             source: self.tx_source_address.clone(),
         };
         let tx_data = intent_transfers.try_to_vec().unwrap();
-        let tx = WrapperTx::new(
-            Fee {
-                amount: 0.into(),
-                token: address::xan(),
-            },
-            &self.tx_signing_key,
-            rpc::query_epoch(args::Query {
+        let to_broadcast = {
+            let epoch = rpc::query_epoch(args::Query {
                 ledger_address: self.ledger_address.clone(),
             })
-            .await,
-            0.into(),
-            Tx::new(tx_code, Some(tx_data)).sign(&self.tx_signing_key),
-        );
+            .await;
+            let tx_signing_key = self.tx_signing_key.lock();
+            let tx = WrapperTx::new(
+                Fee {
+                    amount: 0.into(),
+                    token: address::xan(),
+                },
+                &tx_signing_key,
+                epoch,
+                0.into(),
+                Tx::new(tx_code, Some(tx_data)).sign(&tx_signing_key),
+                // TODO: Actually use the fetched encryption key
+                Default::default(),
+            );
+            let wrapper_hash = if !cfg!(feature = "ABCI") {
+                hash_tx(&tx.try_to_vec().unwrap()).to_string()
+            } else {
+                tx.tx_hash.to_string()
+            };
+
+            let decrypted_hash = if !cfg!(feature = "ABCI") {
+                Some(tx.tx_hash.to_string())
+            } else {
+                None
+            };
+            TxBroadcastData::Wrapper {
+                tx: tx
+                    .sign(&tx_signing_key)
+                    .expect("Wrapper tx signing keypair should be correct"),
+                wrapper_hash,
+                decrypted_hash,
+            }
+        };
 
         let response =
-            broadcast_tx(self.ledger_address.clone(), tx, &self.tx_signing_key)
-                .await;
+            broadcast_tx(self.ledger_address.clone(), &to_broadcast).await;
         match response {
             Ok(tx_response) => {
                 tracing::info!(

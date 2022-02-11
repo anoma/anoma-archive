@@ -1,5 +1,9 @@
 //! Implementation of the `FinalizeBlock` ABCI++ method for the Shell
 
+#[cfg(not(feature = "ABCI"))]
+use anoma::types::key::dkg_session_keys::DkgPublicKey;
+#[cfg(not(feature = "ABCI"))]
+use anoma::types::key::ed25519::SignedTxData;
 use anoma::types::storage::BlockHash;
 #[cfg(not(feature = "ABCI"))]
 use tendermint::block::Header;
@@ -17,6 +21,8 @@ use tendermint_proto_abci::crypto::{
 use tendermint_stable::block::Header;
 
 use super::*;
+#[cfg(not(feature = "ABCI"))]
+use crate::node::ledger::shell::state::ActionQueue;
 
 impl<D, H> Shell<D, H>
 where
@@ -46,13 +52,15 @@ where
     pub fn finalize_block(
         &mut self,
         req: shim::request::FinalizeBlock,
-    ) -> Result<shim::response::FinalizeBlock> {
+    ) -> ShellResult<shim::response::FinalizeBlock> {
         let mut response = shim::response::FinalizeBlock::default();
         // begin the next block and check if a new epoch began
         let (height, new_epoch) =
             self.update_state(req.header, req.hash, req.byzantine_validators);
 
         for processed_tx in &req.txs {
+            #[cfg(not(feature = "ABCI"))]
+            let mut actions = ActionQueue::new();
             let tx = if let Ok(tx) = Tx::try_from(processed_tx.tx.as_ref()) {
                 tx
             } else {
@@ -63,28 +71,40 @@ where
                 continue;
             };
             let tx_length = processed_tx.tx.len();
+            // If [`process_proposal`] rejected a Tx due to invalid signature,
+            // emit an event here and move on to next tx. If we are
+            // rejecting all decrypted txs because they were
+            // submitted in an incorrect order, we do that later.
             if ErrorCodes::from_u32(processed_tx.result.code).unwrap()
                 == ErrorCodes::InvalidSig
             {
-                if let Ok(TxType::Wrapper(wrapper)) = TxType::try_from(tx) {
-                    let mut tx_result = Event::new_tx_event(
-                        &TxType::Wrapper(wrapper),
-                        height.0,
-                    );
-                    tx_result["code"] = processed_tx.result.code.to_string();
-                    tx_result["info"] =
-                        format!("Tx rejected: {}", &processed_tx.result.info);
-                    tx_result["gas_used"] = "0".into();
-                    response.events.push(tx_result.into());
-                    continue;
-                } else {
-                    tracing::error!(
-                        "Internal logic error: FinalizeBlock received a tx \
-                         with an invalid signature error code that could not \
-                         be deserialized to a WrapperTx type"
-                    );
-                    continue;
-                }
+                let mut tx_result = match process_tx(tx.clone()) {
+                    Ok(tx @ TxType::Wrapper(_))
+                    | Ok(tx @ TxType::Protocol(_)) => {
+                        Event::new_tx_event(&tx, height.0)
+                    }
+                    _ => match TxType::try_from(tx) {
+                        Ok(tx @ TxType::Wrapper(_))
+                        | Ok(tx @ TxType::Protocol(_)) => {
+                            Event::new_tx_event(&tx, height.0)
+                        }
+                        _ => {
+                            tracing::error!(
+                                "Internal logic error: FinalizeBlock received \
+                                 a tx with an invalid signature error code \
+                                 that could not be deserialized to a \
+                                 WrapperTx / ProtocolTx type"
+                            );
+                            continue;
+                        }
+                    },
+                };
+                tx_result["code"] = processed_tx.result.code.to_string();
+                tx_result["info"] =
+                    format!("Tx rejected: {}", &processed_tx.result.info);
+                tx_result["gas_used"] = "0".into();
+                response.events.push(tx_result.into());
+                continue;
             }
 
             let tx_type = if let Ok(tx_type) = process_tx(tx) {
@@ -155,6 +175,112 @@ where
                     );
                     continue;
                 }
+                #[cfg(not(feature = "ABCI"))]
+                TxType::Protocol(ProtocolTx {
+                    tx: protocol_tx,
+                    pk,
+                }) => {
+                    if let Some(sender) =
+                        self.get_validator_from_protocol_pk(pk)
+                    {
+                        match protocol_tx {
+                            ProtocolTxType::DKG(msg) => {
+                                if let ShellMode::Validator { dkg, .. } =
+                                    &mut self.mode
+                                {
+                                    if let Ok(serde_json::Value::Object(map)) =
+                                        serde_json::to_value(&msg)
+                                    {
+                                        tracing::info!(
+                                            "Applying DKG message: {}",
+                                            map.keys().next().unwrap()
+                                        );
+                                    }
+                                    if let Err(err) = dkg
+                                        .state_machine
+                                        .apply_message(sender, msg.clone())
+                                    {
+                                        tracing::error!(
+                                            "Internal logic error: \
+                                             FinalizeBlock could not apply a \
+                                             verified DKG protocol message. \
+                                             Received error: {}",
+                                            err
+                                        );
+                                        continue;
+                                    }
+                                }
+                                Event::new_tx_event(&tx_type, height.0)
+                            }
+                            ProtocolTxType::NewDkgKeypair(tx) => {
+                                // we update our new session keypair from the
+                                // queue
+                                // after then inner transaction
+                                // has been applied by the protocol
+                                let data = SignedTxData::try_from_slice(
+                                    &tx.data.as_ref().expect(
+                                        "This This was verified by Process \
+                                         Proposal",
+                                    )[..],
+                                )
+                                .expect("This was verified by Process Proposal")
+                                .data
+                                .expect(
+                                    "This was verified by Process Proposal",
+                                );
+                                let UpdateDkgSessionKey {
+                                    address,
+                                    dkg_public_key,
+                                } = BorshDeserialize::deserialize(
+                                    &mut data.as_slice(),
+                                )
+                                .expect(
+                                    "This was verified by Prepare Proposal",
+                                );
+                                let dkg_public_key: DkgPublicKey =
+                                    BorshDeserialize::deserialize(
+                                        &mut dkg_public_key.as_ref(),
+                                    )
+                                    .expect(
+                                        "This was verified by Prepare Proposal",
+                                    );
+                                if Some(&address)
+                                    == self.mode.get_validator_address()
+                                    && Some(dkg_public_key)
+                                        != self
+                                            .mode
+                                            .get_next_dkg_keypair()
+                                            .map(|kp| kp.public())
+                                {
+                                    // this is not the new keypair requested by
+                                    // this
+                                    // validator,
+                                    // an immediate refresh is needed
+                                    self.request_new_dkg_session_keypair();
+                                } else {
+                                    actions.enqueue(|shell| {
+                                        shell.update_dkg_session_keypair()
+                                    });
+                                }
+
+                                Event::new_tx_event(&tx_type, height.0)
+                            }
+                        }
+                    } else {
+                        let mut tx_result =
+                            Event::new_tx_event(&tx_type, height.0);
+                        tx_result["code"] = ErrorCodes::InvalidSig.into();
+                        tx_result["info"] = "Could not match signature of \
+                                             protocol tx to a public protocol \
+                                             key of an active validator set."
+                            .into();
+                        tx_result["gas_used"] = "0".into();
+                        response.events.push(tx_result.into());
+                        continue;
+                    }
+                }
+                #[cfg(feature = "ABCI")]
+                TxType::Protocol(_) => unreachable!(),
             };
 
             match protocol::apply_tx(
@@ -175,6 +301,9 @@ where
                              {:#?}",
                             result
                         );
+                        // Apply all the enqueued transactions
+                        #[cfg(not(feature = "ABCI"))]
+                        actions.apply_all(self);
                         self.write_log.commit_tx();
                         tx_result["code"] = ErrorCodes::Ok.into();
                         if let Some(ibc_event) = &result.ibc_event {
@@ -220,16 +349,18 @@ where
             }
             response.events.push(tx_result.into());
         }
+        self.reset_tx_queue_iter();
 
         if new_epoch {
             self.update_epoch(&mut response);
+            #[cfg(not(feature = "ABCI"))]
+            self.mode.set_update_dkg();
         }
 
         response.gas_used = self
             .gas_meter
             .finalize_transaction()
             .map_err(|_| Error::GasOverflow)?;
-        self.reset_tx_queue_iter();
         Ok(response)
     }
 
@@ -277,7 +408,7 @@ where
 
     /// If a new epoch begins, we update the response to include
     /// changes to the validator sets and consensus parameters
-    fn update_epoch(&self, response: &mut shim::response::FinalizeBlock) {
+    fn update_epoch(&mut self, response: &mut shim::response::FinalizeBlock) {
         // Apply validator set update
         let (current_epoch, _gas) = self.storage.get_current_epoch();
         // TODO ABCI validator updates on block H affects the validator set
@@ -332,16 +463,7 @@ where
 mod test_finalize_block {
     use anoma::types::address::xan;
     use anoma::types::storage::Epoch;
-    use anoma::types::time::DateTimeUtc;
     use anoma::types::transaction::Fee;
-    #[cfg(not(feature = "ABCI"))]
-    use tendermint::block::header::Version;
-    #[cfg(not(feature = "ABCI"))]
-    use tendermint::{Hash, Time};
-    #[cfg(feature = "ABCI")]
-    use tendermint_stable::block::header::Version;
-    #[cfg(feature = "ABCI")]
-    use tendermint_stable::{Hash, Time};
 
     use super::*;
     use crate::node::ledger::shell::test_utils::*;
@@ -349,48 +471,13 @@ mod test_finalize_block {
         FinalizeBlock, ProcessedTx,
     };
 
-    /// This is just to be used in testing. It is not
-    /// a meaningful default.
-    impl Default for FinalizeBlock {
-        fn default() -> Self {
-            FinalizeBlock {
-                hash: BlockHash([0u8; 32]),
-                header: Header {
-                    version: Version { block: 0, app: 0 },
-                    chain_id: String::from("test")
-                        .try_into()
-                        .expect("Should not fail"),
-                    height: 0u64.try_into().expect("Should not fail"),
-                    time: Time::from(DateTimeUtc::now()),
-                    last_block_id: None,
-                    last_commit_hash: None,
-                    data_hash: None,
-                    validators_hash: Hash::None,
-                    next_validators_hash: Hash::None,
-                    consensus_hash: Hash::None,
-                    app_hash: Vec::<u8>::new()
-                        .try_into()
-                        .expect("Should not fail"),
-                    last_results_hash: None,
-                    evidence_hash: None,
-                    proposer_address: vec![0u8; 20]
-                        .try_into()
-                        .expect("Should not fail"),
-                },
-                byzantine_validators: vec![],
-                txs: vec![],
-                reject_all_decrypted: false,
-            }
-        }
-    }
-
     #[cfg(not(feature = "ABCI"))]
     /// Check that if a wrapper tx was rejected by [`process_proposal`],
     /// check that the correct event is returned. Check that it does
     /// not appear in the queue of txs to be decrypted
     #[test]
     fn test_process_proposal_rejected_wrapper_tx() {
-        let mut shell = setup();
+        let (mut shell, _) = setup();
         let keypair = gen_keypair();
         let mut processed_txs = vec![];
         let mut valid_wrappers = vec![];
@@ -409,6 +496,7 @@ mod test_finalize_block {
                 Epoch(0),
                 0.into(),
                 raw_tx.clone(),
+                Default::default(),
             );
             let tx = wrapper.sign(&keypair).expect("Test failed");
             if i > 1 {
@@ -470,7 +558,7 @@ mod test_finalize_block {
     /// check that the correct event is returned.
     #[test]
     fn test_process_proposal_rejected_wrapper_tx() {
-        let mut shell = setup();
+        let (mut shell, _) = setup();
         let keypair = gen_keypair();
         let mut processed_txs = vec![];
         // create some wrapper txs
@@ -488,6 +576,7 @@ mod test_finalize_block {
                 Epoch(0),
                 0.into(),
                 raw_tx.clone(),
+                Default::default(),
             );
             let tx = wrapper.sign(&keypair).expect("Test failed");
             if i > 1 {
@@ -535,7 +624,7 @@ mod test_finalize_block {
     /// proposal
     #[test]
     fn test_process_proposal_rejected_decrypted_tx() {
-        let mut shell = setup();
+        let (mut shell, _) = setup();
         let keypair = gen_keypair();
         let raw_tx = Tx::new(
             "wasm_code".as_bytes().to_owned(),
@@ -550,6 +639,7 @@ mod test_finalize_block {
             Epoch(0),
             0.into(),
             raw_tx.clone(),
+            Default::default(),
         );
 
         let processed_tx = ProcessedTx {
@@ -590,7 +680,7 @@ mod test_finalize_block {
     /// check that the correct event is returned.
     #[test]
     fn test_process_proposal_rejected_decrypted_tx() {
-        let mut shell = setup();
+        let (mut shell, _) = setup();
         let raw_tx = Tx::new(
             "wasm_code".as_bytes().to_owned(),
             Some(String::from("transaction data").as_bytes().to_owned()),
@@ -630,12 +720,166 @@ mod test_finalize_block {
         assert!(shell.next_wrapper().is_none());
     }
 
+    /// Test that unsigned transactions rejected by [`process_proposal`]
+    /// return correct event.
+    #[test]
+    fn test_unsigned_tx_event() {
+        let (mut shell, _) = setup();
+        let keypair = gen_keypair();
+        let wrapper = Tx::new(
+            vec![],
+            Some(
+                TxType::Wrapper(WrapperTx::new(
+                    Fee {
+                        amount: 0.into(),
+                        token: xan(),
+                    },
+                    &keypair,
+                    Epoch(0),
+                    0.into(),
+                    Tx::new(vec![], None),
+                    Default::default(),
+                ))
+                .try_to_vec()
+                .expect("Test failed"),
+            ),
+        );
+        let processed_tx = ProcessedTx {
+            tx: wrapper.to_bytes(),
+            result: TxResult {
+                code: ErrorCodes::InvalidSig.into(),
+                info: "".into(),
+            },
+        };
+        let events = shell
+            .finalize_block(FinalizeBlock {
+                txs: vec![processed_tx],
+                reject_all_decrypted: false,
+                ..Default::default()
+            })
+            .expect("Test failed");
+        assert_eq!(events.len(), 1);
+
+        #[cfg(not(feature = "ABCI"))]
+        {
+            assert_eq!(events[0].r#type, "accepted");
+            let code = events[0]
+                .attributes
+                .iter()
+                .find(|attr| attr.key.as_str() == "code")
+                .expect("Test failed")
+                .value
+                .as_str();
+            assert_eq!(code, String::from(ErrorCodes::InvalidSig).as_str());
+        }
+        #[cfg(feature = "ABCI")]
+        {
+            assert_eq!(events[0].r#type, "applied");
+            let code = events[0]
+                .attributes
+                .iter()
+                .find(|attr| attr.key == "code".as_bytes())
+                .expect("Test failed")
+                .value
+                .clone();
+            assert_eq!(
+                String::from_utf8(code).expect("Test failed"),
+                String::from(ErrorCodes::InvalidSig)
+            );
+        }
+    }
+
+    #[cfg(not(feature = "ABCI"))]
+    /// Test that if a protocol tx is rejected by [`process_proposal`] that
+    /// the correct event is returned
+    #[test]
+    fn test_rejected_invalid_sig_protocol_tx() {
+        let (mut shell, _) = setup();
+        // check that the protocol tx was not applied
+        let rng = &mut ark_std::test_rng();
+        let non_validator_keys = gen_keypair();
+        let protocol_tx =
+            if let ShellMode::Validator { dkg, .. } = &mut shell.shell.mode {
+                let msg = dkg.state_machine.share(rng).expect("Test failed");
+                ProtocolTxType::DKG(msg).sign(&non_validator_keys)
+            } else {
+                panic!("Test failed");
+            };
+        let processed_tx = ProcessedTx {
+            tx: protocol_tx.to_bytes(),
+            result: TxResult {
+                code: ErrorCodes::InvalidSig.into(),
+                info: "".into(),
+            },
+        };
+        let events = shell
+            .finalize_block(FinalizeBlock {
+                txs: vec![processed_tx],
+                reject_all_decrypted: false,
+                ..Default::default()
+            })
+            .expect("Test failed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].r#type, "applied");
+
+        let code = events[0]
+            .attributes
+            .iter()
+            .find(|attr| attr.key.as_str() == "code")
+            .expect("Test failed")
+            .value
+            .as_str();
+        assert_eq!(code, String::from(ErrorCodes::InvalidSig).as_str());
+    }
+
+    #[cfg(not(feature = "ABCI"))]
+    /// Test that if a protocol tx is signed by a non-validator,
+    /// the correct event is returned
+    #[test]
+    fn test_rejected_non_validator_sig_protocol_tx() {
+        let (mut shell, _) = setup();
+        // check that the protocol tx was not applied
+        let rng = &mut ark_std::test_rng();
+        let non_validator_keys = gen_keypair();
+        let protocol_tx =
+            if let ShellMode::Validator { dkg, .. } = &mut shell.shell.mode {
+                let msg = dkg.state_machine.share(rng).expect("Test failed");
+                ProtocolTxType::DKG(msg).sign(&non_validator_keys)
+            } else {
+                panic!("Test failed");
+            };
+        let processed_tx = ProcessedTx {
+            tx: protocol_tx.to_bytes(),
+            result: TxResult {
+                code: ErrorCodes::Ok.into(),
+                info: "".into(),
+            },
+        };
+        let events = shell
+            .finalize_block(FinalizeBlock {
+                txs: vec![processed_tx],
+                reject_all_decrypted: false,
+                ..Default::default()
+            })
+            .expect("Test failed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].r#type, "applied");
+        let code = events[0]
+            .attributes
+            .iter()
+            .find(|attr| attr.key.as_str() == "code")
+            .expect("Test failed")
+            .value
+            .as_str();
+        assert_eq!(code, String::from(ErrorCodes::InvalidSig).as_str());
+    }
+
     /// Test that the wrapper txs are queued in the order they
     /// are received from the block. Tests that the previously
     /// decrypted txs are de-queued.
     #[test]
     fn test_mixed_txs_queued_in_correct_order() {
-        let mut shell = setup();
+        let (mut shell, _) = setup();
         let keypair = gen_keypair();
         let mut processed_txs = vec![];
         let mut valid_txs = vec![];
@@ -663,6 +907,7 @@ mod test_finalize_block {
                 Epoch(0),
                 0.into(),
                 raw_tx.clone(),
+                Default::default(),
             );
             shell.enqueue_tx(wrapper_tx);
             processed_txs.push(ProcessedTx {
@@ -693,6 +938,7 @@ mod test_finalize_block {
                 Epoch(0),
                 0.into(),
                 raw_tx.clone(),
+                Default::default(),
             );
             let wrapper = wrapper_tx.sign(&keypair).expect("Test failed");
             valid_txs.push(wrapper_tx);
@@ -803,7 +1049,7 @@ mod test_finalize_block {
     ///  2. New wrapper txs are enqueued in correct order
     #[test]
     fn test_decrypted_txs_out_of_order() {
-        let mut shell = setup();
+        let (mut shell, _) = setup();
         let keypair = gen_keypair();
         let mut processed_txs = vec![];
         let mut valid_txs = vec![];
@@ -821,6 +1067,7 @@ mod test_finalize_block {
             Epoch(0),
             0.into(),
             raw_tx,
+            Default::default(),
         );
         let wrapper = wrapper_tx.sign(&keypair).expect("Test failed");
         valid_txs.push(wrapper_tx);
@@ -850,6 +1097,7 @@ mod test_finalize_block {
                 Epoch(0),
                 0.into(),
                 raw_tx.clone(),
+                Default::default(),
             );
             // add the corresponding wrapper tx to the queue
             shell.enqueue_tx(wrapper.clone());

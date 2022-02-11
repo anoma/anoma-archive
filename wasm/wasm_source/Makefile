@@ -11,6 +11,7 @@ wasms += tx_init_validator
 wasms += tx_from_intent
 wasms += tx_transfer
 wasms += tx_unbond
+wasms += tx_update_dkg_session_keypair
 wasms += tx_update_vp
 wasms += tx_withdraw
 wasms += vp_testnet_faucet
@@ -58,7 +59,7 @@ $(patsubst %,watch_%,$(wasms)): watch_%:
 
 # `cargo clippy` one of the wasms, e.g. `make clippy_tx_transfer`
 $(patsubst %,clippy_%,$(wasms)): clippy_%:
-	$(cargo) +$(nightly) clippy --all-targets --features $* -- -D warnings
+	$(cargo) +$(nightly) clippy --features $* -- -D warnings
 
 clean-wasm = rm ../$(wasm).wasm
 clean:

@@ -4,6 +4,10 @@ use std::cmp::max;
 use anoma::ledger::parameters::Parameters;
 use anoma::ledger::pos::PosParams;
 use anoma::types::address::Address;
+#[cfg(not(feature = "ABCI"))]
+use anoma::types::key::dkg_session_keys::DkgPublicKey;
+#[cfg(not(feature = "ABCI"))]
+use anoma::types::key::ed25519::PublicKey;
 use anoma::types::storage::Key;
 use anoma::types::token::{self, Amount};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -41,6 +45,23 @@ where
                 Path::Epoch => {
                     let (epoch, _gas) = self.storage.get_last_epoch();
                     let value = anoma::ledger::storage::types::encode(&epoch);
+                    response::Query {
+                        value,
+                        ..Default::default()
+                    }
+                }
+                Path::EncryptionKey => {
+                    let value = if !cfg!(feature = "ABCI") {
+                        anoma::ledger::storage::types::encode(
+                            &self.storage.encryption_key,
+                        )
+                    } else {
+                        anoma::ledger::storage::types::encode(&Some(
+                            anoma::types::transaction::EncryptionKey::default()
+                                .try_to_vec()
+                                .unwrap(),
+                        ))
+                    };
                     response::Query {
                         value,
                         ..Default::default()
@@ -257,5 +278,53 @@ where
             max_age_duration,
             ..EvidenceParams::default()
         }
+    }
+
+    #[cfg(not(feature = "ABCI"))]
+    pub fn get_validator_from_protocol_pk(
+        &self,
+        pk: &PublicKey,
+    ) -> Option<TendermintValidator> {
+        let pk_bytes = pk
+            .try_to_vec()
+            .expect("Serializing public key should not fail");
+        // get the current epoch
+        let (current_epoch, _) = self.storage.get_current_epoch();
+        // get the active validator set
+        self.storage
+            .read_validator_set()
+            .get(current_epoch)
+            .expect("Validators for the next epoch should be known")
+            .active
+            .iter()
+            .find(|validator| {
+                let pk_key = key::ed25519::protocol_pk_key(&validator.address);
+                match self.storage.read(&pk_key) {
+                    Ok((Some(bytes), _)) => bytes == pk_bytes,
+                    _ => false,
+                }
+            })
+            .map(|validator| {
+                let dkg_key =
+                    key::dkg_session_keys::dkg_pk_key(&validator.address);
+                let bytes = self
+                    .storage
+                    .read(&dkg_key)
+                    .expect("Validator should have public dkg key")
+                    .0
+                    .expect("Validator should have public dkg key");
+                let dkg_publickey =
+                    &<DkgPublicKey as BorshDeserialize>::deserialize(
+                        &mut bytes.as_ref(),
+                    )
+                    .expect(
+                        "DKG public key in storage should be deserializable",
+                    );
+                TendermintValidator {
+                    power: validator.voting_power.into(),
+                    address: validator.address.to_string(),
+                    public_key: dkg_publickey.into(),
+                }
+            })
     }
 }

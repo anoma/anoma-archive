@@ -216,6 +216,30 @@ pub mod tx_update_vp {
     }
 }
 
+/// A tx for updating a validator's DKG public session key
+/// This tx wraps the validity predicate inside `key::ed25519::SignedTxData` as
+/// its input as declared in `shared` crate.
+#[cfg(feature = "tx_update_dkg_session_keypair")]
+pub mod tx_update_dkg_session_keypair {
+    use anoma_vm_env::tx_prelude::*;
+
+    #[transaction]
+    fn apply_tx(tx_data: Vec<u8>) {
+        let signed =
+            key::ed25519::SignedTxData::try_from_slice(&tx_data[..]).unwrap();
+        let update_dkg_keypair =
+            transaction::UpdateDkgSessionKey::try_from_slice(
+                &signed.data.unwrap()[..],
+            )
+            .unwrap();
+        log_string(format!(
+            "update DKG keypair for: {:#?}",
+            &update_dkg_keypair.address
+        ));
+        proof_of_stake::update_dkg_session_keypair(update_dkg_keypair);
+    }
+}
+
 /// A tx for IBC.
 /// This tx executes an IBC operation according to the given IBC message as the
 /// tx_data. This tx uses an IBC message wrapped inside

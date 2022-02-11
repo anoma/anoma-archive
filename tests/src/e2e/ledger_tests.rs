@@ -49,9 +49,7 @@ fn run_ledger() -> Result<()> {
             run_as!(test, Who::NonValidator, Bin::Node, args, Some(40))?;
         ledger.exp_string("Anoma ledger node started")?;
         if !cfg!(feature = "ABCI") {
-            ledger.exp_string(
-                "This node is a validator (NOT in the active validator set)",
-            )?;
+            ledger.exp_string("This node is a fullnode")?;
         } else {
             ledger.exp_string("This node is not a validator")?;
         }
@@ -178,9 +176,15 @@ fn ledger_txs_and_queries() -> Result<()> {
     ledger.exp_string("Anoma ledger node started")?;
     if !cfg!(feature = "ABCI") {
         ledger.exp_string("started node")?;
+        // Wait for the first DKG round to finish
+        ledger.exp_string(
+            "Storing the newly created encryption key from the DKG.",
+        )?;
     } else {
         ledger.exp_string("Started node")?;
     }
+
+    let _live_ledger = ledger.give_up_control();
 
     let vp_user = wasm_abs_path(VP_USER_WASM);
     let vp_user = vp_user.to_string_lossy();
@@ -190,84 +194,83 @@ fn ledger_txs_and_queries() -> Result<()> {
     let validator_one_rpc = get_actor_rpc(&test, &Who::Validator(0));
 
     let txs_args = vec![
-        // 2. Submit a token transfer tx
-        vec![
-            "transfer",
-            "--source",
-            BERTHA,
-            "--target",
-            ALBERT,
-            "--token",
-            XAN,
-            "--amount",
-            "10.1",
-            "--fee-amount",
-            "0",
-            "--gas-limit",
-            "0",
-            "--fee-token",
-            XAN,
-            "--ledger-address",
-            &validator_one_rpc
-        ],
-        // 3. Submit a transaction to update an account's validity
-        // predicate
-        vec![
-            "update",
-             "--address",
-             BERTHA,
-             "--code-path",
-             &vp_user,
-             "--fee-amount",
-             "0",
-             "--gas-limit",
-             "0",
-             "--fee-token",
-             XAN,
-            "--ledger-address",
-            &validator_one_rpc
-        ],
-        // 4. Submit a custom tx
-        vec![
-            "tx",
-            "--signer",
-            BERTHA,
-            "--code-path",
-            &tx_no_op,
-            "--data-path",
-            "README.md",
-            "--fee-amount",
-            "0",
-            "--gas-limit",
-            "0",
-            "--fee-token",
-            XAN,
-            "--ledger-address",
-            &validator_one_rpc
-        ],
-        // 5. Submit a tx to initialize a new account
-        vec![
-            "init-account",
-            "--source",
-            BERTHA,
-            "--public-key",
-            // Value obtained from `anoma::types::key::ed25519::tests::gen_keypair`
-            "200000001be519a321e29020fa3cbfbfd01bd5e92db134305609270b71dace25b5a21168",
-            "--code-path",
-            &vp_user,
-            "--alias",
-            "test-account",
-            "--fee-amount",
-            "0",
-            "--gas-limit",
-            "0",
-            "--fee-token",
-            XAN,
-            "--ledger-address",
-            &validator_one_rpc
-        ],
-    ];
-
+            // 2. Submit a token transfer tx
+            vec![
+                "transfer",
+                "--source",
+                BERTHA,
+                "--target",
+                ALBERT,
+                "--token",
+                XAN,
+                "--amount",
+                "10.1",
+                "--fee-amount",
+                "0",
+                "--gas-limit",
+                "0",
+                "--fee-token",
+                XAN,
+                "--ledger-address",
+                &validator_one_rpc,
+            ],
+            // 3. Submit a transaction to update an account's validity
+            // predicate
+            vec![
+                "update",
+                 "--address",
+                 BERTHA,
+                 "--code-path",
+                 &vp_user,
+                 "--fee-amount",
+                 "0",
+                 "--gas-limit",
+                 "0",
+                 "--fee-token",
+                 XAN,
+                "--ledger-address",
+                &validator_one_rpc,
+            ],
+            // 4. Submit a custom tx
+            vec![
+                "tx",
+                "--signer",
+                BERTHA,
+                "--code-path",
+                &tx_no_op,
+                "--data-path",
+                "README.md",
+                "--fee-amount",
+                "0",
+                "--gas-limit",
+                "0",
+                "--fee-token",
+                XAN,
+                "--ledger-address",
+                &validator_one_rpc,
+            ],
+            // 5. Submit a tx to initialize a new account
+            vec![
+                "init-account",
+                "--source",
+                BERTHA,
+                "--public-key",
+                // Value obtained from `anoma::types::key::ed25519::tests::gen_keypair`
+                "200000001be519a321e29020fa3cbfbfd01bd5e92db134305609270b71dace25b5a21168",
+                "--code-path",
+                &vp_user,
+                "--alias",
+                "test-account",
+                "--fee-amount",
+                "0",
+                "--gas-limit",
+                "0",
+                "--fee-token",
+                XAN,
+                "--ledger-address",
+                &validator_one_rpc,
+            ],
+        ];
     for tx_args in &txs_args {
         for &dry_run in &[true, false] {
             let tx_args = if dry_run {
@@ -316,10 +319,11 @@ fn ledger_txs_and_queries() -> Result<()> {
 
 /// In this test we:
 /// 1. Run the ledger node
-/// 2. Submit an invalid transaction (disallowed by state machine)
-/// 3. Shut down the ledger
-/// 4. Restart the ledger
-/// 5. Submit and invalid transactions (malformed)
+/// 2. Submit a valid transaction before encryption key is created
+/// 3. Submit an invalid transaction (disallowed by state machine)
+/// 4. Shut down the ledger
+/// 5. Restart the ledger
+/// 6. Submit and invalid transactions (malformed)
 #[test]
 fn invalid_transactions() -> Result<()> {
     let test = setup::single_node_net()?;
@@ -333,10 +337,44 @@ fn invalid_transactions() -> Result<()> {
     } else {
         ledger.exp_string("Started node")?;
     }
-    // Wait to commit a block
-    ledger.exp_regex(r"Committed block hash.*, height: [0-9]+")?;
+    let validator_one_rpc = get_actor_rpc(&test, &Who::Validator(0));
+    if !cfg!(feature = "ABCI") {
+        // 2. Submit a valid transaction before encryption key is created
+        let tx_args = vec![
+            "transfer",
+            "--source",
+            BERTHA,
+            "--target",
+            ALBERT,
+            "--token",
+            XAN,
+            "--amount",
+            "10.1",
+            "--fee-amount",
+            "0",
+            "--gas-limit",
+            "0",
+            "--fee-token",
+            XAN,
+            "--ledger-address",
+            &validator_one_rpc,
+        ];
+        let mut client = run!(test, Bin::Client, tx_args, Some(20))?;
+        // transaction should be rejected
+        client.exp_string(
+            "An encryption key was not found for the current epoch. \
+             Transactions can not be sent.",
+        )?;
+        // client process should exit with error code
+        client.assert_failure();
+        // Wait for the first DKG round to finish
+        ledger.exp_string(
+            "Storing the newly created encryption key from the DKG.",
+        )?;
+    }
+    let live_ledger = ledger.give_up_control();
 
-    // 2. Submit a an invalid transaction (trying to mint tokens should fail
+    // 3. Submit a an invalid transaction (trying to mint tokens should fail
     // in the token's VP)
     let tx_data_path = test.base_dir.path().join("tx.data");
     let transfer = token::Transfer {
@@ -352,8 +390,6 @@ fn invalid_transactions() -> Result<()> {
     std::fs::write(&tx_data_path, data).unwrap();
     let tx_wasm_path = tx_wasm_path.to_string_lossy();
     let tx_data_path = tx_data_path.to_string_lossy();
-
-    let validator_one_rpc = get_actor_rpc(&test, &Who::Validator(0));
 
     let tx_args = vec![
         "tx",
@@ -382,12 +418,13 @@ fn invalid_transactions() -> Result<()> {
     client.exp_string(r#""code": "1"#)?;
 
     client.assert_success();
+    let mut ledger = live_ledger.gain_control();
     ledger.exp_string("some VPs rejected apply_tx storage modification")?;
 
     // Wait to commit a block
     ledger.exp_regex(r"Committed block hash.*, height: [0-9]+")?;
 
-    // 3. Shut it down
+    // 4. Shut it down
     ledger.send_control('c')?;
     // Wait for the node to stop running to finish writing the state and tx
     // queue
@@ -395,7 +432,7 @@ fn invalid_transactions() -> Result<()> {
     ledger.exp_eof()?;
     drop(ledger);
 
-    // 4. Restart the ledger
+    // 5. Restart the ledger
     let mut ledger =
         run_as!(test, Who::Validator(0), Bin::Node, &["ledger"], Some(40))?;
 
@@ -404,7 +441,7 @@ fn invalid_transactions() -> Result<()> {
     // There should be previous state now
     ledger.exp_string("Last state root hash:")?;
 
-    // 5. Submit an invalid transactions (invalid token address)
+    // 6. Submit an invalid transactions (invalid token address)
     let tx_args = vec![
         "transfer",
         "--source",
@@ -434,6 +471,7 @@ fn invalid_transactions() -> Result<()> {
     if !cfg!(feature = "ABCI") {
         client.exp_string("Transaction accepted")?;
     }
+
     client.exp_string("Transaction applied")?;
 
     client.exp_string("Error trying to apply a transaction")?;
@@ -457,25 +495,29 @@ fn invalid_transactions() -> Result<()> {
 #[test]
 fn pos_bonds() -> Result<()> {
     let unbonding_len = 2;
-    let test = setup::network(
-        |genesis| {
-            let parameters = ParametersConfig {
-                min_num_of_blocks: 2,
-                min_duration: 1,
-            };
-            let pos_params = PosParamsConfig {
-                pipeline_len: 1,
-                unbonding_len,
-                ..genesis.pos_params
-            };
-            GenesisConfig {
-                parameters,
-                pos_params,
-                ..genesis
-            }
-        },
-        None,
-    )?;
+    let test = if !cfg!(feature = "ABCI") {
+        setup::single_node_net()?
+    } else {
+        setup::network(
+            |genesis| {
+                let parameters = ParametersConfig {
+                    min_num_of_blocks: 2,
+                    min_duration: 1,
+                };
+                let pos_params = PosParamsConfig {
+                    pipeline_len: 1,
+                    unbonding_len,
+                    ..genesis.pos_params
+                };
+                GenesisConfig {
+                    parameters,
+                    pos_params,
+                    ..genesis
+                }
+            },
+            None,
+        )?
+    };
 
     // 1. Run the ledger node
     let mut ledger =
@@ -484,10 +526,16 @@ fn pos_bonds() -> Result<()> {
     ledger.exp_string("Anoma ledger node started")?;
     if !cfg!(feature = "ABCI") {
         ledger.exp_string("started node")?;
+        // Wait for the first DKG round to finish
+        ledger.exp_string(
+            "Storing the newly created encryption key from the DKG.",
+        )?;
     } else {
         ledger.exp_string("Started node")?;
     }
 
+    // stop reading logs from the ledger to save on memory.
+    let _live_ledger = ledger.give_up_control();
     let validator_one_rpc = get_actor_rpc(&test, &Who::Validator(0));
 
     // 2. Submit a self-bond for the genesis validator
@@ -507,7 +555,7 @@ fn pos_bonds() -> Result<()> {
         &validator_one_rpc,
     ];
     let mut client =
-        run_as!(test, Who::Validator(0), Bin::Client, tx_args, Some(40))?;
+        run_as!(test, Who::Validator(0), Bin::Client, tx_args, Some(60))?;
     client.exp_string("Transaction is valid.")?;
     client.assert_success();
 
@@ -529,7 +577,7 @@ fn pos_bonds() -> Result<()> {
         "--ledger-address",
         &validator_one_rpc,
     ];
-    let mut client = run!(test, Bin::Client, tx_args, Some(40))?;
+    let mut client = run!(test, Bin::Client, tx_args, Some(60))?;
     client.exp_string("Transaction is valid.")?;
     client.assert_success();
 
@@ -550,7 +598,7 @@ fn pos_bonds() -> Result<()> {
         &validator_one_rpc,
     ];
     let mut client =
-        run_as!(test, Who::Validator(0), Bin::Client, tx_args, Some(40))?;
+        run_as!(test, Who::Validator(0), Bin::Client, tx_args, Some(60))?;
     client.exp_string("Transaction is valid.")?;
     client.assert_success();
 
@@ -572,7 +620,7 @@ fn pos_bonds() -> Result<()> {
         "--ledger-address",
         &validator_one_rpc,
     ];
-    let mut client = run!(test, Bin::Client, tx_args, Some(40))?;
+    let mut client = run!(test, Bin::Client, tx_args, Some(60))?;
     client.exp_string("Transaction is valid.")?;
     client.assert_success();
 
@@ -613,7 +661,7 @@ fn pos_bonds() -> Result<()> {
         &validator_one_rpc,
     ];
     let mut client =
-        run_as!(test, Who::Validator(0), Bin::Client, tx_args, Some(40))?;
+        run_as!(test, Who::Validator(0), Bin::Client, tx_args, Some(60))?;
     client.exp_string("Transaction is valid.")?;
     client.assert_success();
 
@@ -633,7 +681,7 @@ fn pos_bonds() -> Result<()> {
         "--ledger-address",
         &validator_one_rpc,
     ];
-    let mut client = run!(test, Bin::Client, tx_args, Some(40))?;
+    let mut client = run!(test, Bin::Client, tx_args, Some(60))?;
     client.exp_string("Transaction is valid.")?;
     client.assert_success();
 
@@ -679,10 +727,15 @@ fn pos_init_validator() -> Result<()> {
     ledger.exp_string("Anoma ledger node started")?;
     if !cfg!(feature = "ABCI") {
         ledger.exp_string("started node")?;
+        // Wait for the first DKG round to finish
+        ledger.exp_string(
+            "Storing the newly created encryption key from the DKG.",
+        )?;
     } else {
         ledger.exp_string("Started node")?;
     }
 
+    let _live_ledger = ledger.give_up_control();
     let validator_one_rpc = get_actor_rpc(&test, &Who::Validator(0));
 
     // 2. Initialize a new validator account
@@ -840,17 +893,20 @@ fn ledger_many_txs_in_a_block() -> Result<()> {
 
     // 1. Run the ledger node
     let mut ledger =
-        run_as!(*test, Who::Validator(0), Bin::Node, &["ledger"], Some(40))?;
+        run_as!(*test, Who::Validator(0), Bin::Node, &["ledger"], Some(60))?;
 
     ledger.exp_string("Anoma ledger node started")?;
     if !cfg!(feature = "ABCI") {
         ledger.exp_string("started node")?;
+        // Wait for the first DKG round to finish
+        ledger.exp_string(
+            "Storing the newly created encryption key from the DKG.",
+        )?;
     } else {
         ledger.exp_string("Started node")?;
     }
 
-    // Wait to commit a block
-    ledger.exp_regex(r"Committed block hash.*, height: [0-9]+")?;
+    let _live_ledger = ledger.give_up_control();
 
     let validator_one_rpc = Arc::new(get_actor_rpc(&test, &Who::Validator(0)));
 

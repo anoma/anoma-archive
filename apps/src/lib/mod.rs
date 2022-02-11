@@ -18,3 +18,7 @@ pub mod wasm_loader;
 // Taken from <https://github.com/rust-lang/rfcs/issues/2324#issuecomment-502437904>.
 #[doc(inline)]
 pub use std;
+
+#[cfg(all(test, not(feature = "ABCI")))]
+#[macro_use]
+extern crate assert_matches;
