@@ -65,6 +65,8 @@ pub mod tx {
     use anoma::types::time::Rfc3339String;
     pub use borsh::{BorshDeserialize, BorshSerialize};
 
+    use crate::mock_host_fn;
+
     #[derive(Debug)]
     pub struct KeyValIterator<T>(pub u64, pub PhantomData<T>);
 
@@ -276,6 +278,7 @@ pub mod tx {
 
     /// These host functions are implemented in the Anoma's [`host_env`]
     /// module. The environment provides calls to them via this C interface.
+    #[cfg(all(not(tarpaulin), tarpaulin_include))]
     extern "C" {
         // Read variable-length data when we don't know the size up-front,
         // returns the size of the value (can be 0), or -1 if the key is
@@ -353,6 +356,37 @@ pub mod tx {
         // Requires a node running with "Info" log level
         fn anoma_tx_log_string(str_ptr: u64, str_len: u64);
     }
+
+    mock_host_fn!(anoma_tx_read(key_ptr: u64, key_len: u64) -> i64);
+    mock_host_fn!(anoma_tx_result_buffer(result_ptr: u64));
+    mock_host_fn!(anoma_tx_has_key(key_ptr: u64, key_len: u64) -> i64);
+    mock_host_fn!(anoma_tx_write(
+        key_ptr: u64,
+        key_len: u64,
+        val_ptr: u64,
+        val_len: u64
+    ));
+    mock_host_fn!(anoma_tx_delete(key_ptr: u64, key_len: u64));
+    mock_host_fn!(anoma_tx_iter_prefix(prefix_ptr: u64, prefix_len: u64) -> u64);
+    mock_host_fn!(anoma_tx_iter_next(iter_id: u64) -> i64);
+    mock_host_fn!(anoma_tx_insert_verifier(addr_ptr: u64, addr_len: u64));
+    mock_host_fn!(anoma_tx_update_validity_predicate(
+        addr_ptr: u64,
+        addr_len: u64,
+        code_ptr: u64,
+        code_len: u64,
+    ));
+    mock_host_fn!(anoma_tx_init_account(
+        code_ptr: u64,
+        code_len: u64,
+        result_ptr: u64
+    ));
+    mock_host_fn!(anoma_tx_emit_ibc_event(event_ptr: u64, event_len: u64));
+    mock_host_fn!(anoma_tx_get_chain_id(result_ptr: u64));
+    mock_host_fn!(anoma_tx_get_block_height() -> u64);
+    mock_host_fn!(anoma_tx_get_block_hash(result_ptr: u64));
+    mock_host_fn!(anoma_tx_get_block_epoch() -> u64);
+    mock_host_fn!(anoma_tx_log_string(str_ptr: u64, str_len: u64));
 }
 
 /// Validity predicate environment imports
@@ -368,6 +402,8 @@ pub mod vp {
         BlockHash, BlockHeight, Epoch, BLOCK_HASH_LENGTH,
     };
     pub use borsh::{BorshDeserialize, BorshSerialize};
+
+    use crate::mock_host_fn;
 
     pub struct PreKeyValIterator<T>(pub u64, pub PhantomData<T>);
 
@@ -566,6 +602,7 @@ pub mod vp {
 
     /// These host functions are implemented in the Anoma's [`host_env`]
     /// module. The environment provides calls to them via this C interface.
+    #[cfg(all(not(tarpaulin), tarpaulin_include))]
     extern "C" {
         // Read variable-length prior state when we don't know the size
         // up-front, returns the size of the value (can be 0), or -1 if
@@ -643,5 +680,51 @@ pub mod vp {
             input_data_ptr: u64,
             input_data_len: u64,
         ) -> i64;
+    }
+
+    mock_host_fn!(anoma_vp_read_pre(key_ptr: u64, key_len: u64) -> i64);
+    mock_host_fn!(anoma_vp_read_post(key_ptr: u64, key_len: u64) -> i64);
+    mock_host_fn!(anoma_vp_result_buffer(result_ptr: u64));
+    mock_host_fn!(anoma_vp_has_key_pre(key_ptr: u64, key_len: u64) -> i64);
+    mock_host_fn!(anoma_vp_has_key_post(key_ptr: u64, key_len: u64) -> i64);
+    mock_host_fn!(anoma_vp_iter_prefix(prefix_ptr: u64, prefix_len: u64) -> u64);
+    mock_host_fn!(anoma_vp_iter_pre_next(iter_id: u64) -> i64);
+    mock_host_fn!(anoma_vp_iter_post_next(iter_id: u64) -> i64);
+    mock_host_fn!(anoma_vp_get_chain_id(result_ptr: u64));
+    mock_host_fn!(anoma_vp_get_block_height() -> u64);
+    mock_host_fn!(anoma_vp_get_block_hash(result_ptr: u64));
+    mock_host_fn!(anoma_vp_get_block_epoch() -> u64);
+    mock_host_fn!(anoma_vp_verify_tx_signature(
+            pk_ptr: u64,
+            pk_len: u64,
+            sig_ptr: u64,
+            sig_len: u64,
+        ) -> i64);
+    mock_host_fn!(anoma_vp_eval(
+            vp_code_ptr: u64,
+            vp_code_len: u64,
+            input_data_ptr: u64,
+            input_data_len: u64,
+        ) -> i64);
+    mock_host_fn!(anoma_vp_log_string(str_ptr: u64, str_len: u64));
+}
+
+/// A helper macro for vm_env tarpaulin compilation.
+#[macro_export]
+macro_rules! mock_host_fn {
+    // unit return type
+    ( $fn:ident ( $($arg:ident : $type:ty),* $(,)?) ) => {
+        #[cfg(all(tarpaulin, not(tarpaulin_include)))]
+        extern "C" fn $fn( $($arg: $type),* ) {
+            unimplemented!("This is only used to compile this crate for code coverage. It should never be called.")
+        }
+    };
+
+    // non-unit return type
+    ( $fn:ident ( $($arg:ident : $type:ty),* $(,)?) -> $ret:ty ) => {
+        #[cfg(all(tarpaulin, not(tarpaulin_include)))]
+        extern "C" fn $fn( $($arg: $type),* ) -> $ret {
+            unimplemented!("This is only used to compile this crate for code coverage. It should never be called.")
+        }
     }
 }
