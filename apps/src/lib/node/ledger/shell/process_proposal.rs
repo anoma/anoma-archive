@@ -1,6 +1,13 @@
 //! Implementation of the ['VerifyHeader`], [`ProcessProposal`],
 //! and [`RevertProposal`] ABCI++ methods for the Shell
+use anoma::types::transaction::protocol::ProtocolTxType;
+#[cfg(not(feature = "ABCI"))]
+use anoma::types::transaction::protocol::VoteExtension;
+
 use super::*;
+#[cfg(not(feature = "ABCI"))]
+use crate::node::ledger::shell::vote_extensions::VoteExtensionData;
+use crate::std::option::Option::None;
 
 impl<D, H> Shell<D, H>
 where
@@ -69,11 +76,40 @@ where
                            are not supported"
                         .into(),
                 },
-                TxType::Protocol(_) => TxResult {
-                    code: ErrorCodes::InvalidTx.into(),
-                    info: "Protocol transactions are a fun new feature that \
-                           is coming soon to a blockchain near you. Patience."
-                        .into(),
+                TxType::Protocol(protocol_tx) => match &protocol_tx.tx {
+                    ProtocolTxType::VoteExtensions(_exts) => {
+                        #[cfg(not(feature = "ABCI"))]
+                        if self.validate_vote_extensions(_exts) {
+                            TxResult {
+                                code: ErrorCodes::Ok.into(),
+                                info: "Process proposal accepted this \
+                                       transaction"
+                                    .into(),
+                            }
+                        } else {
+                            TxResult {
+                                code: ErrorCodes::InvalidTx.into(),
+                                info: "The vote extensions were not properly \
+                                       signed."
+                                    .into(),
+                            }
+                        }
+                        #[cfg(feature = "ABCI")]
+                        TxResult {
+                            code: ErrorCodes::InvalidTx.into(),
+                            info: "Protocol transactions are a fun new \
+                                   feature that is coming soon to a \
+                                   blockchain near you. Patience."
+                                .into(),
+                        }
+                    }
+                    _ => TxResult {
+                        code: ErrorCodes::InvalidTx.into(),
+                        info: "Protocol transactions are a fun new feature \
+                               that is coming soon to a blockchain near you. \
+                               Patience."
+                            .into(),
+                    },
                 },
                 TxType::Decrypted(tx) => match self.next_wrapper() {
                     Some(wrapper) => {
@@ -125,14 +161,14 @@ where
                             .unwrap_or_default();
 
                         if tx.fee.amount <= balance {
-                            shim::response::TxResult {
+                            TxResult {
                                 code: ErrorCodes::Ok.into(),
                                 info: "Process proposal accepted this \
                                        transaction"
                                     .into(),
                             }
                         } else {
-                            shim::response::TxResult {
+                            TxResult {
                                 code: ErrorCodes::InvalidTx.into(),
                                 info: "The address given does not have \
                                        sufficient balance to pay fee"
@@ -216,7 +252,7 @@ where
                 // this ensures that emitted events are of the correct type
                 decoded_resp.tx = decoded;
                 // this ensures that the tx queue is empty even if an error
-                // happend in [`process_proposal`].
+                // happened in [`process_proposal`].
                 self.storage.tx_queue.pop();
                 decoded_resp
             } else {
@@ -228,6 +264,39 @@ where
             wrapper_resp.tx = req.tx;
             wrapper_resp
         }
+    }
+
+    /// Verify that each vote extension was signed by a validator in the
+    /// correct epoch and that the signature is correct.
+    #[cfg(not(feature = "ABCI"))]
+    pub fn validate_vote_extensions(&self, exts: &[VoteExtension]) -> bool {
+        // a committed block was validated by the validator set of the epoch
+        // the previously committed block belonged to.
+        let height = if self.storage.last_height.0 > 0 {
+            BlockHeight(self.storage.last_height.0 - 1)
+        } else {
+            BlockHeight(self.storage.last_height.0)
+        };
+        let epoch = if let Some(epoch) =
+            self.storage.block.pred_epochs.get_epoch(height)
+        {
+            epoch
+        } else {
+            return false;
+        };
+
+        exts.iter()
+            .filter_map(|ext| VoteExtensionData::try_from(ext).ok())
+            .all(|VoteExtensionData { ethereum_headers }| {
+                ethereum_headers.iter().all(|header| {
+                    self.get_validator_from_protocol_pk(
+                        &header.public_key,
+                        Some(epoch),
+                    )
+                    .is_some()
+                        && header.verify_signature().is_ok()
+                })
+            })
     }
 
     #[cfg(not(feature = "ABCI"))]
@@ -245,6 +314,8 @@ where
 mod test_process_proposal {
     use anoma::proto::SignedTxData;
     use anoma::types::address::xan;
+    #[cfg(not(feature = "ABCI"))]
+    use anoma::types::ethereum_headers::EthereumHeader;
     use anoma::types::hash::Hash;
     use anoma::types::key::*;
     use anoma::types::storage::Epoch;
@@ -262,7 +333,9 @@ mod test_process_proposal {
     use tendermint_proto_abci::google::protobuf::Timestamp;
 
     use super::*;
-    use crate::node::ledger::shell::test_utils::{gen_keypair, TestShell};
+    use crate::node::ledger::shell::test_utils::*;
+    #[cfg(not(feature = "ABCI"))]
+    use crate::node::ledger::shims::abcipp_shim_types::shim::request::FinalizeBlock;
     use crate::node::ledger::shims::abcipp_shim_types::shim::request::ProcessProposal;
 
     /// Test that if a wrapper tx is not signed, it is rejected
@@ -744,5 +817,98 @@ mod test_process_proposal {
         {
             assert_eq!(response.tx, tx.to_bytes());
         }
+    }
+
+    #[cfg(not(feature = "ABCI"))]
+    /// Test that Ethereum headers signed by a non-validator is rejected
+    #[test]
+    fn test_eth_headers_must_be_signed_by_validator() {
+        let (shell, _) = setup();
+        let signing_key = gen_keypair();
+        let signed_header = EthereumHeader {
+            hash: Hash([0; 32]),
+            parent_hash: Hash([0; 32]),
+            number: 0u64,
+            difficulty: 0.into(),
+            mix_hash: Hash([0; 32]),
+            nonce: Default::default(),
+            state_root: Hash([0; 32]),
+            transactions_root: Hash([0; 32]),
+        }
+        .sign(&signing_key);
+        let vote_extensions = vec![VoteExtension {
+            signed_data: VoteExtensionData {
+                ethereum_headers: vec![signed_header],
+            }
+            .try_to_vec()
+            .expect("Test failed"),
+            self_authenticating_data: vec![],
+        }];
+        assert!(!shell.validate_vote_extensions(vote_extensions.as_slice()));
+    }
+
+    #[cfg(not(feature = "ABCI"))]
+    /// Test that validation of vote extensions cast during the previous
+    /// block are accepted for the current block. This should pass even
+    /// if the epoch changed resulting in a change to the validator set.
+    #[test]
+    fn test_validate_vote_extensions() {
+        let (mut shell, _) = setup();
+        let protocol_key = shell.shell.mode.get_protocol_key().unwrap().clone();
+        let signed_header = EthereumHeader {
+            hash: Hash([0; 32]),
+            parent_hash: Hash([0; 32]),
+            number: 0u64,
+            difficulty: 0.into(),
+            mix_hash: Hash([0; 32]),
+            nonce: Default::default(),
+            state_root: Hash([0; 32]),
+            transactions_root: Hash([0; 32]),
+        }
+        .sign(&protocol_key);
+        let vote_extensions = vec![VoteExtension {
+            signed_data: VoteExtensionData {
+                ethereum_headers: vec![signed_header],
+            }
+            .try_to_vec()
+            .expect("Test failed"),
+            self_authenticating_data: vec![],
+        }];
+        assert_eq!(shell.shell.storage.get_current_epoch().0.0, 0);
+        // We make a change so that there are no
+        // validators in the next epoch
+        let mut current_validators = shell.shell.storage.read_validator_set();
+        current_validators.data.insert(
+            1,
+            Some(pos::types::ValidatorSet {
+                active: Default::default(),
+                inactive: Default::default(),
+            }),
+        );
+        shell.shell.storage.write_validator_set(&current_validators);
+        // we advance forward to the next epoch
+        let mut req = FinalizeBlock::default();
+        req.header.height = 11u32.into();
+        req.header.time = tendermint::time::Time::now();
+        shell.finalize_block(req).expect("Test failed");
+        shell.shell.commit();
+
+        assert!(
+            shell
+                .shell
+                .get_validator_from_protocol_pk(&protocol_key.ref_to(), None)
+                .is_none()
+        );
+        let prev_epoch = Epoch(shell.shell.storage.get_current_epoch().0.0 - 1);
+        assert!(
+            shell
+                .shell
+                .get_validator_from_protocol_pk(
+                    &protocol_key.ref_to(),
+                    Some(prev_epoch)
+                )
+                .is_some()
+        );
+        assert!(shell.validate_vote_extensions(vote_extensions.as_slice()));
     }
 }
