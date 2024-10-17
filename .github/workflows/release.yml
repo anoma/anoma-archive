@@ -29,14 +29,8 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - otp: 24
-            otp_version: "24.0"
-          - otp: 25
-            otp_version: "25.0.4"
-          - otp: 26
-            otp_version: "26.0.2"
-          # - otp: 27
-          #   otp_version: "27.0"
+          - otp: 27
+            otp_version: "27.0"
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
