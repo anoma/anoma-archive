@@ -70,6 +70,10 @@ defmodule Anoma.ShieldedResource.ShieldedTransaction do
   end
 
   defimpl Anoma.RM.Transaction, for: __MODULE__ do
+    def resources(_) do
+      raise "Not implemented"
+    end
+
     def commitments(%ShieldedTransaction{commitments: cm}), do: cm
     def nullifiers(%ShieldedTransaction{nullifiers: nf}), do: nf
 

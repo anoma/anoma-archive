@@ -17,6 +17,9 @@ defprotocol Anoma.RM.Transaction do
   @spec verify(t()) :: boolean()
   def verify(transaction)
 
+  @spec resources(t()) :: list(binary())
+  def resources(transaction)
+
   @spec storage_commitments(t()) :: list(binary())
   def storage_commitments(transaction)
 
@@ -66,6 +69,11 @@ defimpl Anoma.RM.Transaction, for: Anoma.RM.DumbIntent do
   end
 
   @impl true
+  def resources(%DumbIntent{} = _intent) do
+    []
+  end
+
+  @impl true
   def storage_commitments(_) do
     raise "Not implemented"
   end
@@ -101,6 +109,7 @@ end
 
 defimpl Anoma.RM.Transaction, for: Anoma.TransparentResource.Transaction do
   alias Anoma.TransparentResource.Transaction
+  alias Anoma.TransparentResource.Resource
 
   # https://specs.anoma.net/latest/system_architecture/state/resource_machine/transaction.html
   @impl true
@@ -111,6 +120,13 @@ defimpl Anoma.RM.Transaction, for: Anoma.TransparentResource.Transaction do
   @impl true
   def verify(%Transaction{} = tx) do
     Transaction.verify(tx)
+  end
+
+  @impl true
+  def resources(%Transaction{} = tx) do
+    tx.actions
+    |> Enum.flat_map(& &1.proofs)
+    |> Enum.map(&Resource.nullifier/1)
   end
 
   @impl true

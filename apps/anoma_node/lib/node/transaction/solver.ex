@@ -14,8 +14,9 @@ defmodule Anoma.Node.Transaction.Solver do
   use GenServer
 
   alias __MODULE__
-  alias Anoma.Node.Transaction.IntentPool
+  alias Anoma.Node
   alias Anoma.Node.Registry
+  alias Anoma.Node.Transaction.IntentPool
   alias Anoma.RM.Transaction
   alias EventBroker.Event
   alias EventBroker.Filters

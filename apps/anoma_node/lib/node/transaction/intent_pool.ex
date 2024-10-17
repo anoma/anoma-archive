@@ -4,19 +4,21 @@ defmodule Anoma.Node.Transaction.IntentPool do
   m1dnight still has to write these docs.
   """
 
+  require Anoma.Node.Event
   require EventBroker.Event
   require Logger
 
   alias __MODULE__
+  alias Anoma.Node
+  alias Anoma.Node
   alias Anoma.Node.Registry
+  alias Anoma.Node.Transaction.Backends
   alias Anoma.RM.Transaction
   alias EventBroker.Broker
 
-  require Node.Event
-
   use EventBroker.DefFilter
-  use TypedStruct
   use GenServer
+  use TypedStruct
 
   ############################################################
   #                      State                               #
@@ -31,6 +33,7 @@ defmodule Anoma.Node.Transaction.IntentPool do
     - `:node_id` - The ID of the Node.
     """
     field(:intents, MapSet.t(Transaction.t()), default: MapSet.new())
+    field(:node_id, String.t())
   end
 
   ############################################################
@@ -182,17 +185,13 @@ defmodule Anoma.Node.Transaction.IntentPool do
 
   @spec handle_new_nullifiers(t(), MapSet.t(binary())) :: t()
   defp handle_new_nullifiers(state, nlfs_set) do
-    set_of_txs = state.intents
-
     new_intents =
-      Enum.reject(set_of_txs, fn x ->
-        Stream.map(x.actions, fn x -> x.proofs end)
-        |> Stream.map(fn x ->
-          x.resource |> Anoma.TransparentResource.Resource.nullifier()
-        end)
-        |> Enum.any?(&MapSet.member?(nlfs_set, &1))
+      state.intents
+      |> Enum.reject(fn intent ->
+        intent_resources = MapSet.new(Transaction.resources(intent))
+        MapSet.intersection(intent_resources, nlfs_set) != MapSet.new()
       end)
-      |> Enum.into(&MapSet.new/1)
+      |> Enum.into(MapSet.new())
 
     %__MODULE__{state | intents: new_intents}
   end
