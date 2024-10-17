@@ -1,33 +1,21 @@
 defmodule Anoma.Node.Examples.ELogging do
-  alias Anoma.Node.Logging
-  alias Anoma.Node.Transaction.Mempool
-  alias Anoma.Node.Examples.ENode
+  alias Anoma.Node
+  alias Node.Logging
+  alias Node.Transaction.Mempool
+  alias Node.Examples.ENode
 
-  require EventBroker.Event
+  require Node.Event
 
   require ExUnit.Assertions
   import ExUnit.Assertions
 
-  def restart_logging do
-    # if GenServer.whereis(Logging) do
-    #   GenServer.stop(Logging)
-    # end
-
-    # :mnesia.clear_table(Anoma.Node.Logging.Events)
-
-    # Logging.start_link(node_id: "londo_mollari")
-  end
-
-  def check_tx_event(
-        node_id \\ ("londo_mollari" <> :crypto.strong_rand_bytes(16))
-        |> Base.url_encode64()
-      ) do
+  def check_tx_event(node_id \\ Node.example_random_id()) do
     ENode.start_node(node_id: node_id)
     table_name = Logging.table_name(node_id)
 
     :mnesia.subscribe({:table, table_name, :simple})
 
-    tx_event("id 1", "back 1", "code 1")
+    tx_event("id 1", "back 1", "code 1", node_id)
 
     assert_receive(
       {:mnesia_table_event, {:write, {_, "id 1", {"back 1", "code 1"}}, _}},
@@ -42,18 +30,15 @@ defmodule Anoma.Node.Examples.ELogging do
     :mnesia.unsubscribe({:table, table_name, :simple})
   end
 
-  def check_multiple_tx_events(
-        node_id \\ ("londo_mollari" <> :crypto.strong_rand_bytes(16))
-        |> Base.url_encode64()
-      ) do
+  def check_multiple_tx_events(node_id \\ Node.example_random_id()) do
     ENode.start_node(node_id: node_id)
 
     table_name = Logging.table_name(node_id)
 
     :mnesia.subscribe({:table, table_name, :simple})
 
-    tx_event("id 1", "back 1", "code 1")
-    tx_event("id 2", "back 2", "code 2")
+    tx_event("id 1", "back 1", "code 1", node_id)
+    tx_event("id 2", "back 2", "code 2", node_id)
 
     assert_receive(
       {:mnesia_table_event,
@@ -81,7 +66,7 @@ defmodule Anoma.Node.Examples.ELogging do
   end
 
   def check_consensus_event(
-        node_id \\ ("londo_mollari" <> :crypto.strong_rand_bytes(16))
+        node_id \\ Node.example_random_id()
         |> Base.url_encode64()
       ) do
     check_tx_event(node_id)
@@ -89,7 +74,7 @@ defmodule Anoma.Node.Examples.ELogging do
 
     :mnesia.subscribe({:table, table_name, :simple})
 
-    consensus_event(["id 1"])
+    consensus_event(["id 1"], node_id)
 
     assert_receive(
       {:mnesia_table_event,
@@ -106,7 +91,7 @@ defmodule Anoma.Node.Examples.ELogging do
   end
 
   def check_consensus_event_multiple(
-        node_id \\ ("londo_mollari" <> :crypto.strong_rand_bytes(16))
+        node_id \\ Node.example_random_id()
         |> Base.url_encode64()
       ) do
     check_multiple_tx_events(node_id)
@@ -114,8 +99,8 @@ defmodule Anoma.Node.Examples.ELogging do
 
     :mnesia.subscribe({:table, table_name, :simple})
 
-    consensus_event(["id 1"])
-    consensus_event(["id 2"])
+    consensus_event(["id 1"], node_id)
+    consensus_event(["id 2"], node_id)
 
     assert_receive(
       {:mnesia_table_event,
@@ -132,7 +117,7 @@ defmodule Anoma.Node.Examples.ELogging do
   end
 
   def check_block_event(
-        node_id \\ ("londo_mollari" <> :crypto.strong_rand_bytes(16))
+        node_id \\ Node.example_random_id()
         |> Base.url_encode64()
       ) do
     check_consensus_event(node_id)
@@ -140,7 +125,7 @@ defmodule Anoma.Node.Examples.ELogging do
 
     :mnesia.subscribe({:table, table_name, :simple})
 
-    block_event(["id 1"], 0)
+    block_event(["id 1"], 0, node_id)
 
     assert_receive(
       {:mnesia_table_event, {:delete, {^table_name, "id 1"}, _}},
@@ -161,14 +146,14 @@ defmodule Anoma.Node.Examples.ELogging do
   end
 
   def check_block_event_multiple(
-        node_id \\ ("londo_mollari" <> :crypto.strong_rand_bytes(16))
+        node_id \\ Node.example_random_id()
         |> Base.url_encode64()
       ) do
     check_consensus_event_multiple(node_id)
     table_name = Logging.table_name(node_id)
 
     :mnesia.subscribe({:table, table_name, :simple})
-    block_event(["id 1"], 0)
+    block_event(["id 1"], 0, node_id)
 
     assert_receive(
       {:mnesia_table_event, {:delete, {^table_name, "id 1"}, _}},
@@ -185,7 +170,7 @@ defmodule Anoma.Node.Examples.ELogging do
                :mnesia.read(table_name, "id 1")
              end)
 
-    block_event(["id 2"], 0)
+    block_event(["id 2"], 0, node_id)
 
     assert_receive(
       {:mnesia_table_event, {:delete, {^table_name, "id 2"}, _}},
@@ -206,14 +191,14 @@ defmodule Anoma.Node.Examples.ELogging do
   end
 
   def check_block_event_leave_one_out(
-        node_id \\ ("londo_mollari" <> :crypto.strong_rand_bytes(16))
+        node_id \\ Node.example_random_id()
         |> Base.url_encode64()
       ) do
     check_consensus_event_multiple(node_id)
     table_name = Logging.table_name(node_id)
 
     :mnesia.subscribe({:table, table_name, :simple})
-    block_event(["id 1"], 0)
+    block_event(["id 1"], 0, node_id)
 
     assert_receive(
       {:mnesia_table_event, {:delete, {^table_name, "id 1"}, _}},
@@ -238,9 +223,9 @@ defmodule Anoma.Node.Examples.ELogging do
              end)
   end
 
-  def tx_event(id, backend, code) do
+  def tx_event(id, backend, code, node_id) do
     event =
-      EventBroker.Event.new_with_body(%Mempool.TxEvent{
+      Node.Event.new_with_body(node_id, %Mempool.TxEvent{
         id: id,
         tx: %Mempool.Tx{backend: backend, code: code}
       })
@@ -248,18 +233,18 @@ defmodule Anoma.Node.Examples.ELogging do
     EventBroker.event(event)
   end
 
-  def consensus_event(order) do
+  def consensus_event(order, node_id) do
     event =
-      EventBroker.Event.new_with_body(%Mempool.ConsensusEvent{
+      Node.Event.new_with_body(node_id, %Mempool.ConsensusEvent{
         order: order
       })
 
     EventBroker.event(event)
   end
 
-  def block_event(order, round) do
+  def block_event(order, round, node_id) do
     event =
-      EventBroker.Event.new_with_body(%Mempool.BlockEvent{
+      Node.Event.new_with_body(node_id, %Mempool.BlockEvent{
         order: order,
         round: round
       })

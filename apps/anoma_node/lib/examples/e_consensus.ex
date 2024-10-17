@@ -1,9 +1,9 @@
 defmodule Anoma.Node.Examples.EConsensus do
-  alias Anoma.Node.Examples.{ETransaction, ELogging}
-  alias Anoma.Node.Examples.ENode
-  alias Anoma.Node.Registry
-  alias Anoma.Node.Transaction.Mempool
-  alias Anoma.Node.Utility.Consensus
+  alias Anoma.Node
+  alias Node.{Examples, Registry}
+  alias Examples.{ETransaction, ENode}
+  alias Node.Transaction.Mempool
+  alias Node.Utility.Consensus
 
   require EventBroker.Event
 
@@ -32,7 +32,6 @@ defmodule Anoma.Node.Examples.EConsensus do
 
   def restart_consensus_env(node_id \\ "londo_mollari") do
     ETransaction.restart_tx_module(node_id)
-    ELogging.restart_logging()
     restart_consensus(node_id)
   end
 
@@ -51,8 +50,11 @@ defmodule Anoma.Node.Examples.EConsensus do
 
     assert_receive(
       %EventBroker.Event{
-        body: %Mempool.BlockEvent{
-          order: []
+        body: %Node.Event{
+          node_id: ^node_id,
+          body: %Mempool.BlockEvent{
+            order: []
+          }
         }
       },
       5000
@@ -91,8 +93,11 @@ defmodule Anoma.Node.Examples.EConsensus do
 
     assert_receive(
       %EventBroker.Event{
-        body: %Mempool.ConsensusEvent{
-          order: []
+        body: %Node.Event{
+          node_id: ^node_id,
+          body: %Mempool.ConsensusEvent{
+            order: []
+          }
         }
       },
       5000
@@ -100,8 +105,11 @@ defmodule Anoma.Node.Examples.EConsensus do
 
     assert_receive(
       %EventBroker.Event{
-        body: %Mempool.BlockEvent{
-          order: []
+        body: %Node.Event{
+          node_id: ^node_id,
+          body: %Mempool.BlockEvent{
+            order: []
+          }
         }
       },
       5000
@@ -109,8 +117,11 @@ defmodule Anoma.Node.Examples.EConsensus do
 
     assert_receive(
       %EventBroker.Event{
-        body: %Mempool.ConsensusEvent{
-          order: ["id 1"]
+        body: %Node.Event{
+          node_id: ^node_id,
+          body: %Mempool.ConsensusEvent{
+            order: ["id 1"]
+          }
         }
       },
       5000
@@ -118,8 +129,11 @@ defmodule Anoma.Node.Examples.EConsensus do
 
     assert_receive(
       %EventBroker.Event{
-        body: %Mempool.BlockEvent{
-          order: ["id 1"]
+        body: %Node.Event{
+          node_id: ^node_id,
+          body: %Mempool.BlockEvent{
+            order: ["id 1"]
+          }
         }
       },
       5000
