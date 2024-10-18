@@ -28,54 +28,48 @@ defmodule Anoma.ShieldedResource.PartialTransaction do
     end
 
     logic = to_noun_list.(logic_proofs)
-    compilance = to_noun_list.(compliance_proofs)
-    checked = Enum.all?(logic ++ compilance, &(elem(&1, 0) == :ok))
+    compliance = to_noun_list.(compliance_proofs)
+    checked = Enum.all?(logic ++ compliance, &(elem(&1, 0) == :ok))
 
     with true <- checked do
       {:ok,
        %PartialTransaction{
          logic_proofs: Enum.map(logic, &elem(&1, 1)),
-         compliance_proofs: Enum.map(compilance, &elem(&1, 1))
+         compliance_proofs: Enum.map(compliance, &elem(&1, 1))
        }}
     else
       false -> :error
     end
   end
 
-  @spec verify(t()) :: boolean()
+  @spec verify(t()) :: boolean() | {:error, term()}
   def verify(partial_transaction) do
-    all_logic_proofs_valid =
-      for proof_record <- partial_transaction.logic_proofs,
-          reduce: true do
-        acc ->
-          result =
-            proof_record.proof
-            |> :binary.bin_to_list()
-            |> Cairo.verify(
-              proof_record.public_inputs
-              |> :binary.bin_to_list()
-            )
+    with valid_logic when is_boolean(valid_logic) <-
+           verify_proofs(partial_transaction.logic_proofs),
+         valid_compliance when is_boolean(valid_compliance) <-
+           verify_proofs(partial_transaction.compliance_proofs) do
+      valid_logic and valid_compliance
+    else
+      {:error, t} -> {:error, t}
+    end
+  end
 
-          acc && result
+  @spec verify_proofs(list(ProofRecord.t())) ::
+          boolean() | {:error, term()}
+  defp verify_proofs(proofs) do
+    Enum.reduce_while(proofs, true, fn proof_record, _acc ->
+      public_inputs =
+        proof_record.public_inputs
+        |> :binary.bin_to_list()
+
+      case proof_record.proof
+           |> :binary.bin_to_list()
+           |> Cairo.verify(public_inputs) do
+        {:error, t} -> {:halt, {:error, t}}
+        false -> {:halt, false}
+        true -> {:cont, true}
       end
-
-    all_compliance_proofs_valid =
-      for proof_record <- partial_transaction.compliance_proofs,
-          reduce: true do
-        acc ->
-          result =
-            proof_record.proof
-            |> :binary.bin_to_list()
-            |> Cairo.verify(
-              proof_record.public_inputs
-              |> :binary.bin_to_list()
-            )
-
-          Logger.debug("compliance result: #{inspect(result)}")
-          acc && result
-      end
-
-    all_logic_proofs_valid && all_compliance_proofs_valid
+    end)
   end
 
   defimpl Noun.Nounable, for: __MODULE__ do
